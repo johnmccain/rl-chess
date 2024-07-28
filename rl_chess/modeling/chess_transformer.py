@@ -66,10 +66,10 @@ class ChessTransformer(nn.Module):
 
     INPUT_DIM = 64  # Number of positions on the chess board
     OUTPUT_DIM = 64  # Number of spaces each piece could move to
+    VOCAB_SIZE = 13  # Number of unique tokens in the input
 
     def __init__(
         self,
-        vocab_size: int,
         d_model: int,
         nhead: int,
         num_layers: int,
@@ -77,15 +77,29 @@ class ChessTransformer(nn.Module):
         dropout: float,
     ):
         super(ChessTransformer, self).__init__()
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_layers = num_layers
+        self.dim_feedforward = dim_feedforward
+        self.dropout = dropout
 
         self.embedding = ChessTransformerEmbeddings(
-            vocab_size=vocab_size, d_model=d_model
+            vocab_size=self.VOCAB_SIZE, d_model=d_model
         )
         self.layers = nn.ModuleList(
             nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
             for _ in range(num_layers)
         )
         self.output_layer = nn.Linear(d_model, self.OUTPUT_DIM)
+
+    def get_hparams(self) -> dict:
+        return {
+            "d_model": self.d_model,
+            "nhead": self.nhead,
+            "num_layers": self.num_layers,
+            "dim_feedforward": self.dim_feedforward,
+            "dropout": self.dropout,
+        }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch_size, seq_len) -> (seq_len, batch_size, d_model)

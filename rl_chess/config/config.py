@@ -23,5 +23,9 @@ config = Dynaconf(
 class AppConfig(BaseModel):
     APP_OUTPUT_DIR: str = config["app.output_dir"]
     APP_TENSORBOARD_DIR: str = config["app.tensorboard_dir"]
+    APP_SAVE_STEPS: int = config["app.save_steps"]
 
     MODEL_LR: float = config["model.lr"]
+    MODEL_GAMMA: float = config["model.gamma"]
+    MODEL_DECAY: float = config["model.decay"]
+    MODEL_CLIP_GRAD: float = config["model.clip_grad"]

@@ -54,6 +54,17 @@ def evaluate_fitness(board: chess.Board, player: chess.Color) -> float:
     return material
 
 
+def calculate_reward(board: chess.Board, move: chess.Move) -> float:
+    """
+    Calculate the reward for a given move on the board, but without actually making the move.
+    """
+    player = board.turn
+    board.push(move)
+    reward = evaluate_fitness(board, player)
+    board.pop()
+    return reward
+
+
 def get_piece_id(piece_type: chess.PieceType, is_player_piece: bool) -> int:
     base_id = piece_type  # base IDs for player pieces (1-6)
     if not is_player_piece:

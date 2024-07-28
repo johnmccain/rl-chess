@@ -1,7 +1,11 @@
 [APP]
 TENSORBOARD_DIR = "tensorboard"
 OUTPUT_DIR = "out"
+SAVE_STEPS = 1000
 
 [MODEL]
 
-LR = 1e-4
+LR = 5e-5
+GAMMA = 0.99
+DECAY = 0.995
+CLIP_GRAD = 1.0
