@@ -11,6 +11,12 @@
             "module": "rl_chess.main"
         },
         {
+            "name": "rl_chess.modeling.train",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "rl_chess.modeling.train"
+        },
+        {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
