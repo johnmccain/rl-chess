@@ -1,0 +1,27 @@
+import os
+import pathlib
+
+from dynaconf import Dynaconf
+from pydantic import BaseModel
+
+current_dir = pathlib.Path(__file__).parent
+
+# Load the environment from the `ENV` environment variable, defaulting to `local`.
+env = os.environ.get("ENV", "local")
+
+config = Dynaconf(
+    envvar_prefix="DYNACONF",  # `envvar_prefix` = export envvars with `export DYNACONF_FOO=bar`.
+    settings_files=[
+        current_dir / "default.toml",
+        current_dir / f"{env}.toml",
+        current_dir / ".secrets.toml",
+    ],
+    merge_enabled=True,
+)
+
+
+class AppConfig(BaseModel):
+    APP_OUTPUT_DIR: str = config["app.output_dir"]
+    APP_TENSORBOARD_DIR: str = config["app.tensorboard_dir"]
+
+    MODEL_LR: float = config["model.lr"]

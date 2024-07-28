@@ -1,0 +1,7 @@
+[APP]
+TENSORBOARD_DIR = "tensorboard"
+OUTPUT_DIR = "out"
+
+[MODEL]
+
+LR = 1e-4

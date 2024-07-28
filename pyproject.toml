@@ -17,6 +17,8 @@ chess = "^1.10.0"
 torch = "^2.4.0"
 pygame = "^2.6.0"
 numpy = "^2.0.1"
+pydantic = "^2.8.2"
+dynaconf = "^3.2.6"
 
 
 [tool.poetry.group.dev.dependencies]
