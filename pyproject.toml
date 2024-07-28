@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "rl-chess"
+version = "0.1.0"
+description = ""
+authors = ["John McCain <johnm.freestate@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+chess = "^1.10.0"
+torch = "^2.4.0"
+pygame = "^2.6.0"
+
+
+[tool.poetry.group.dev.dependencies]
+jupyter = "^1.0.0"
+pytest = "^8.3.2"
+pytest-asyncio = "^0.23.8"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
