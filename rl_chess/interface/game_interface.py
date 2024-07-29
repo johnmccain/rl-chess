@@ -277,15 +277,53 @@ class GameInterface:
             pg.display.update()
         return selected_color
 
+    def display_move_scores(
+        self, board: chess.Board, move_scores: dict[chess.Move, float]
+    ) -> None:
+        """
+        Highlight the top-rated moves on the board with a gradient of colors outlining the squares.
+        Blue indicates a low score, red indicates a high score.
+        """
+        max_score = max(move_scores.values())
+        min_score = min(move_scores.values())
+        for move, score in move_scores.items():
+            square = move.to_square
+            row, col = chess.square_rank(square), chess.square_file(square)
+            if board.turn == chess.BLACK:
+                row = 7 - row
+                col = 7 - col
+            orig_square_color = (
+                self.LIGHT_SQUARE_COLOR
+                if (row + col) % 2 == 0
+                else self.DARK_SQUARE_COLOR
+            )
+            scaled_score = (score - min_score) / (max_score - min_score)
+            logger.info(f"Highlighting square {square} with score {scaled_score}")
+            tint = self.mix_color((0, 0, 255), (255, 0, 0), scaled_score)
+            pg.draw.rect(
+                self.screen,
+                self.mix_color(tint, orig_square_color),
+                pg.Rect(
+                    self.FONT_PADDING / 2 + self.SQUARE_SIZE * col,
+                    self.FONT_PADDING / 2 + self.SQUARE_SIZE * (7 - row),
+                    self.SQUARE_SIZE,
+                    self.SQUARE_SIZE,
+                ),
+                4,
+            )
+
     def update_display(
         self,
         board: chess.Board,
         selected_square: chess.Square | None = None,
+        move_scores: dict[chess.Move, float] | None = None,
     ) -> None:
         self.draw_blank_board(board.turn)
         if selected_square is not None:
             self.draw_selected(board, selected_square)
             self.draw_legal_moves(board, selected_square)
+        if move_scores is not None:
+            self.display_move_scores(board, move_scores)
         self.draw_pieces(board)
         if board.is_game_over():
             outcome = board.outcome()
@@ -307,6 +345,7 @@ class GameRunner:
         self.board = board or chess.Board()
         self.chess_agent = chess_agent or ChessAgent()
         self.game_interface = game_interface or GameInterface()
+        self.move_scores: dict[chess.Move, float] | None = None
         self.selected_square = None
         self.running = True
 
@@ -329,6 +368,7 @@ class GameRunner:
             piece = self.board.piece_at(square)
             if piece is not None and self.board.turn == piece.color:
                 logger.info(f"Selected piece: {piece} at {square}")
+                self.move_scores = None
                 self.selected_square = square
         else:
             # move the selected piece (if the move is legal)
@@ -339,6 +379,7 @@ class GameRunner:
             else:
                 logger.info(f"Selected invalid move: {move}")
             self.selected_square = None
+            self.move_scores = None
 
     def ai_move(self, board: chess.Board) -> None:
         move = self.chess_agent.select_top_rated_move(board)
@@ -349,7 +390,9 @@ class GameRunner:
         player_color = self.game_interface.select_color()
         while self.running:
             self.game_interface.update_display(
-                board=self.board, selected_square=self.selected_square
+                board=self.board,
+                selected_square=self.selected_square,
+                move_scores=self.move_scores,
             )
             for event in pg.event.get():
                 if event.type == pg.QUIT:
@@ -357,6 +400,16 @@ class GameRunner:
                     self.running = False
                 elif event.type == pg.MOUSEBUTTONUP and self.board.turn == player_color:
                     self.handle_mouseup(*pg.mouse.get_pos())
-                elif self.board.turn != player_color and not self.board.is_game_over():
-                    self.ai_move(self.board)
+            if self.board.turn != player_color and not self.board.is_game_over():
+                self.ai_move(self.board)
+            if (
+                self.selected_square is not None
+                and self.board.turn == player_color
+                and self.move_scores is None
+            ):
+                # Calculate move scores if a piece is selected
+                logger.info(f"Calculating move scores for {self.selected_square}")
+                self.move_scores = self.chess_agent.rate_moves_from_position(
+                    self.board, self.selected_square
+                )
         pg.quit()

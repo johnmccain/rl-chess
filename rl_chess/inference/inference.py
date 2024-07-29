@@ -75,3 +75,34 @@ class ChessAgent:
         logger.info(f"Best move score: {best_move_score}")
 
         return best_move
+
+    def rate_moves_from_position(
+        self, board: chess.Board, square: chess.Square
+    ) -> dict[chess.Move, float]:
+        """
+        Perform inference using the ChessTransformer model and return a dict mapping from legal moves to their scores given a board state and a square.
+        """
+
+        # Convert the current board state to a tensor
+        current_state = board_to_tensor(board, board.turn)
+        current_state = current_state.unsqueeze(0)  # Add a batch dimension
+
+        with torch.no_grad():  # Disable gradient computation for inference
+            # Get the model's predictions for the current state
+            logits: torch.Tensor = self.model(current_state)
+            logits = logits.view(-1)  # Flatten the logits
+
+        # Generate a mask for the legal moves
+        legal_moves_mask = get_legal_moves_mask(board)
+        masked_logits = logits.masked_fill(legal_moves_mask == 0, -1e10)
+
+        move_scores = {}
+        for index, score in enumerate(masked_logits):
+            if index // 64 != square:
+                continue
+            if score < -1e6:
+                continue
+            move = index_to_move(index, board)
+            move_scores[move] = score.item()
+
+        return move_scores
