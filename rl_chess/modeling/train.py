@@ -3,11 +3,10 @@ import logging
 import random
 
 import chess
+import pandas as pd
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-import torch_optimizer  # noqa: F401
-from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from rl_chess import base_path
@@ -31,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def write_log(
+    model_timestamp: str,
     board: chess.Board,
     move: chess.Move,
     score: float,
@@ -43,8 +43,17 @@ def write_log(
     """
     with open("log.csv", "a") as f:
         f.write(
-            f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, {episode}, Board('{board.fen()}'), Move('{move}'), {score}, {total_loss}, {loss}\n"
+            f"{model_timestamp},{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{episode},{board.fen()},{move},{score},{total_loss},{loss}\n"
         )
+
+
+def sample_opening_state(openings_df: pd.DataFrame) -> chess.Board:
+    """
+    Sample a random opening move from the dataset.
+    """
+    opening = openings_df.sample()
+    board = chess.Board(opening["fen"].values[0])
+    return board
 
 
 def train_deep_q_network(
@@ -52,16 +61,18 @@ def train_deep_q_network(
     episodes: int,
     app_config: AppConfig = AppConfig(),
 ):
+    openings_df = pd.read_csv(base_path / "data/openings_fen7.csv")
     model_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    # device = torch.device("mps")
-    device = torch.device("cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
     model.to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=episodes, eta_min=1e-6
     )
-    # optimizer = torch_optimizer.Ranger(model.parameters(), lr=app_config.MODEL_LR)
 
     loss_fn = F.mse_loss
     epsilon = 1.0
@@ -98,11 +109,25 @@ def train_deep_q_network(
             app_config.MODEL_INITIAL_GAMMA + gamma_ramp * episode,
             app_config.MODEL_GAMMA,
         )
+        # 25% of the time, start with a random opening state
+        if random.random() < 0.25:
+            board = sample_opening_state(openings_df)
         board = chess.Board()
         total_loss = 0.0
         moves = 0
 
-        while not board.is_game_over():
+        if episode % 100 == 0:
+            write_log(
+                model_timestamp=model_timestamp,
+                board=board,
+                move=None,
+                score=None,
+                episode=episode,
+                total_loss=None,
+                loss=None,
+            )
+
+        while not board.is_game_over() and moves < app_config.MODEL_MAX_MOVES:
             current_state = board_to_tensor(board, board.turn).to(device)
             current_state = current_state.unsqueeze(0)  # Batch size of 1
 
@@ -195,14 +220,16 @@ def train_deep_q_network(
             )
             moves += 1
 
-            # write_log(
-            #     board=board,
-            #     move=move,
-            #     score=predicted_q.item(),
-            #     episode=episode,
-            #     total_loss=total_loss,
-            #     loss=loss.item(),
-            # )
+            if episode % 100 == 0:
+                write_log(
+                    model_timestamp=model_timestamp,
+                    board=board,
+                    move=move,
+                    score=predicted_q.item(),
+                    episode=episode,
+                    total_loss=total_loss,
+                    loss=loss.item(),
+                )
             if moves % app_config.MODEL_GRAD_STEPS == 0 or done:
                 # Gradient accumulation
                 optimizer.step()
@@ -228,6 +255,13 @@ def train_deep_q_network(
                 / app_config.APP_OUTPUT_DIR
                 / f"model_{model_timestamp}_e{episode}.pt",
             )
+            # Save optimizer state
+            torch.save(
+                optimizer.state_dict(),
+                base_path
+                / app_config.APP_OUTPUT_DIR
+                / f"optimizer_{model_timestamp}_e{episode}.pt",
+            )
 
         # Epsilon decay
         epsilon = max(epsilon * app_config.MODEL_DECAY, app_config.MODEL_MIN_EPSILON)
@@ -247,10 +281,10 @@ def train_deep_q_network(
 if __name__ == "__main__":
     app_config = AppConfig()
     model = ChessTransformer(
-        d_model=256,
+        d_model=128,
         nhead=8,
         num_layers=4,
-        dim_feedforward=512,
+        dim_feedforward=256,
         dropout=0.1,
         freeze_pos=True,
     )

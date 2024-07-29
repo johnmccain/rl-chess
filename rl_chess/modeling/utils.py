@@ -7,86 +7,78 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def material_balance(board: chess.Board):
-    white = board.occupied_co[chess.WHITE]
-    black = board.occupied_co[chess.BLACK]
-    return (
-        (chess.popcount(white & board.pawns) - chess.popcount(black & board.pawns))
-        + (
-            3
-            * (
-                chess.popcount(white & board.knights)
-                - chess.popcount(black & board.knights)
-            )
-        )
-        + (
-            3
-            * (
-                chess.popcount(white & board.bishops)
-                - chess.popcount(black & board.bishops)
-            )
-        )
-        + (
-            5
-            * (
-                chess.popcount(white & board.rooks)
-                - chess.popcount(black & board.rooks)
-            )
-        )
-        + (
-            9
-            * (
-                chess.popcount(white & board.queens)
-                - chess.popcount(black & board.queens)
-            )
-        )
+def calculate_material_score(board: chess.Board) -> float:
+    """
+    Material score normalized by the total material on the board.
+    """
+    piece_values = {
+        chess.PAWN: 1,
+        chess.KNIGHT: 3,
+        chess.BISHOP: 3,
+        chess.ROOK: 5,
+        chess.QUEEN: 9,
+        chess.KING: 0,  # Not counting the king in material balance
+    }
+
+    white_material = sum(
+        len(board.pieces(piece_type, chess.WHITE)) * value
+        for piece_type, value in piece_values.items()
+    )
+    black_material = sum(
+        len(board.pieces(piece_type, chess.BLACK)) * value
+        for piece_type, value in piece_values.items()
     )
 
+    total_material = white_material + black_material
+    if total_material == 0:
+        return 0
 
-def evaluate_fitness(board: chess.Board, player: chess.Color) -> float:
+    white_material_score = (white_material - black_material) / total_material
+    return white_material_score if board.turn == chess.WHITE else -white_material_score
+
+
+def calculate_move_quality(board: chess.Board, move: chess.Move) -> float:
     """
-    Evaluate the fitness of a given board state for the given player.
-    :param board: The board state to evaluate.
-    :param player: The player for whom to evaluate the board state.
+    Calculate heuristic score for a given move.
     """
-    # Material balance
-    material = material_balance(board)
+    score = 0
 
-    # Checkmate
-    if board.is_checkmate():
-        return 100 if board.turn == player else -100
+    # Reward for controlling the center
+    central_squares = [chess.D4, chess.E4, chess.D5, chess.E5]
+    if move.to_square in central_squares:
+        score += 0.01
 
-    # Stalemate
-    if board.is_stalemate():
-        return 0
+    # Reward for developing pieces in the opening
+    if board.fullmove_number <= 10:
+        if board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
+            score += 0.01
 
-    # Insufficient material
-    if board.is_insufficient_material():
-        return 0
+    # Penalize moving the same piece multiple times in the opening
+    if board.fullmove_number <= 10:
+        if board.move_stack and move.from_square == board.move_stack[-1].to_square:
+            score -= 0.01
 
-    # Draw by 50-move rule
-    if board.is_seventyfive_moves():
-        return 0
-
-    return material
+    return score
 
 
 def calculate_reward(
     board: chess.Board, move: chess.Move, flip_perspective: bool = False
 ) -> float:
-    """
-    Calculate the reward for a given move on the board, but without actually making the move.
-    """
     player = board.turn
-    if flip_perspective:
-        player = not player
+    move_quality = calculate_move_quality(board, move)
     board.push(move)
-    reward = evaluate_fitness(board, player)
-    # scale the reward to [-1, 1]
-    reward = np.tanh(
-        reward / 68
-    )  # 68 for scaling denominator so that checkmate is approximately +/-0.9 after tanh scaling
+
+    if board.is_checkmate():
+        reward = 1 if board.turn != player else -1
+    elif board.is_stalemate() or board.is_insufficient_material():
+        reward = 0
+    else:
+        reward = calculate_material_score(board) + move_quality
     board.pop()
+
+    if flip_perspective:
+        reward = -reward
+
     return reward
 
 

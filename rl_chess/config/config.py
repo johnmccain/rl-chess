@@ -36,5 +36,6 @@ class AppConfig(BaseModel):
     MODEL_DECAY: float = config["model.decay"]
     MODEL_MIN_EPSILON: float = config["model.min_epsilon"]
     MODEL_CLIP_GRAD: float = config["model.clip_grad"]
+    MODEL_MAX_MOVES: int = config["model.max_moves"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]
