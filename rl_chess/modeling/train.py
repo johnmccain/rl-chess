@@ -29,21 +29,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def sample_opening_states(
-    openings_df: pd.DataFrame, batch_size: int
-) -> list[chess.Board]:
+def write_log(
+    model_timestamp: str,
+    board: chess.Board,
+    move: chess.Move,
+    score: float,
+    episode: int,
+    total_loss: float,
+    loss: float,
+):
     """
-    Sample random opening moves from the dataset.
+    Detailed move-by-move logging for debugging.
     """
-    openings = openings_df.sample(n=batch_size)
-    boards = [chess.Board(fen) for fen in openings["fen"].values]
-    return boards
+    with open("log.csv", "a") as f:
+        f.write(
+            f"{model_timestamp},{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{episode},{board.fen()},{move},{score},{total_loss},{loss}\n"
+        )
+
+
+def sample_opening_state(openings_df: pd.DataFrame) -> chess.Board:
+    """
+    Sample a random opening move from the dataset.
+    """
+    opening = openings_df.sample()
+    board = chess.Board(opening["fen"].values[0])
+    return board
 
 
 def train_deep_q_network(
     model: ChessTransformer,
     episodes: int,
-    batch_size: int,
     app_config: AppConfig = AppConfig(),
 ):
     openings_df = pd.read_csv(base_path / "data/openings_fen7.csv")
@@ -83,7 +98,6 @@ def train_deep_q_network(
             "decay": app_config.MODEL_DECAY,
             "clip_grad": app_config.MODEL_CLIP_GRAD,
             "optimizer": str(type(optimizer)),
-            "batch_size": batch_size,
         }
     )
     writer.add_hparams(
@@ -100,129 +114,101 @@ def train_deep_q_network(
             app_config.MODEL_INITIAL_GAMMA + gamma_ramp * episode,
             app_config.MODEL_GAMMA,
         )
-        # 25% of the time, start with random opening states
+        # 25% of the time, start with a random opening state
         if random.random() < 0.25:
-            boards = sample_opening_states(openings_df, batch_size)
-        else:
-            boards = [chess.Board() for _ in range(batch_size)]
-
+            board = sample_opening_state(openings_df)
+        board = chess.Board()
         total_loss = 0.0
         moves = 0
 
-        active_games = batch_size
-        while active_games > 0 and moves < app_config.MODEL_MAX_MOVES:
-            current_states = torch.stack(
-                [
-                    board_to_tensor(board, board.turn)
-                    for board in boards
-                    if not board.is_game_over()
-                ]
-            ).to(device)
+        if episode % 100 == 0:
+            write_log(
+                model_timestamp=model_timestamp,
+                board=board,
+                move=None,
+                score=None,
+                episode=episode,
+                total_loss=None,
+                loss=None,
+            )
+
+        while not board.is_game_over() and moves < app_config.MODEL_MAX_MOVES:
+            current_state = board_to_tensor(board, board.turn).to(device)
+            current_state = current_state.unsqueeze(0)  # Batch size of 1
 
             # Predict Q-values
-            predicted_q_values: torch.Tensor = model(current_states)
+            predicted_q_values: torch.Tensor = model(current_state)
 
             # Mask illegal moves
-            legal_moves_masks = torch.stack(
-                [
-                    get_legal_moves_mask(board)
-                    for board in boards
-                    if not board.is_game_over()
-                ]
-            ).to(device)
+            legal_moves_mask = get_legal_moves_mask(board).to(device)
             masked_q_values = predicted_q_values.masked_fill(
-                legal_moves_masks == 0, -1e10
+                legal_moves_mask == 0, -1e10
             )
 
             # Epsilon-greedy action selection
             if random.random() > epsilon:
-                actions = masked_q_values.max(1)[1].view(-1, 1)
+                action = masked_q_values.max(1)[1].view(1, 1)
             else:
-                # Select actions randomly with softmax
-                actions = torch.multinomial(F.softmax(masked_q_values, dim=-1), 1)
+                # Select action randomly with softmax
+                action = torch.multinomial(F.softmax(masked_q_values, dim=-1), 1)
 
-            # Take actions and observe rewards and next states
-            rewards = []
-            opp_rewards = []
-            next_states = []
-            dones = []
+            # Take action and observe reward and next state
+            move = index_to_move(action, board)
+            if move is None:
+                logger.warning("Invalid move selected!")
+                break
+            reward = calculate_reward(board, move)
+            # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
+            opp_reward = calculate_reward(board, move, flip_perspective=True)
 
-            active_boards = [board for board in boards if not board.is_game_over()]
-            valid_actions = []
-            for board, action in zip(active_boards, actions):
-                move = index_to_move(action.item(), board)
-                if move is None:
-                    # If the move is not legal, choose a random legal move
-                    legal_moves = list(board.legal_moves)
-                    if legal_moves:
-                        move = random.choice(legal_moves)
-                    else:
-                        # If no legal moves, consider the game as done
-                        dones.append(1)
-                        rewards.append(0)
-                        opp_rewards.append(0)
-                        next_states.append(board_to_tensor(board, board.turn))
-                        continue
+            # Take the action
+            board.push(move)
+            opp_next_state = board_to_tensor(board, board.turn).to(device)
+            opp_next_state = opp_next_state.unsqueeze(0)
 
-                valid_actions.append(action)
-                rewards.append(calculate_reward(board, move))
-                opp_rewards.append(calculate_reward(board, move, flip_perspective=True))
+            done = torch.tensor([int(board.is_game_over())], device=device)
 
-                board.push(move)
-                next_states.append(board_to_tensor(board, board.turn))
-                dones.append(int(board.is_game_over()))
-
-                if not board.is_game_over():
-                    # Select opponent next move
-                    opp_state = (
-                        board_to_tensor(board, board.turn).unsqueeze(0).to(device)
-                    )
-                    with torch.no_grad():
-                        opp_q_values = model(opp_state)
-                    opp_legal_moves_mask = get_legal_moves_mask(board).to(device)
-                    opp_masked_q_values = opp_q_values.masked_fill(
-                        opp_legal_moves_mask == 0, -1e10
-                    )
-                    if random.random() > epsilon:
-                        opp_action = opp_masked_q_values.max(1)[1].view(1, 1)
-                    else:
-                        opp_action = torch.multinomial(
-                            F.softmax(opp_masked_q_values, dim=-1), 1
-                        )
-                    opp_move = index_to_move(opp_action.item(), board)
-                    if opp_move is None:
-                        # If opponent move is not legal, choose a random legal move
-                        legal_moves = list(board.legal_moves)
-                        if legal_moves:
-                            opp_move = random.choice(legal_moves)
-                        else:
-                            # If no legal moves, consider the game as done
-                            dones[-1] = 1
-                            continue
-                    board.push(opp_move)
-
-            rewards = torch.tensor(rewards, device=device)
-            opp_rewards = torch.tensor(opp_rewards, device=device)
-            next_states = torch.stack(next_states).to(device)
-            dones = torch.tensor(dones, device=device)
-            valid_actions = torch.stack(valid_actions)
-
-            # Compute next state Q-values
-            with torch.no_grad():
-                next_q_values = model(next_states)
-                next_legal_moves_masks = torch.stack(
-                    [get_legal_moves_mask(board) for board in active_boards]
-                ).to(device)
-                masked_next_q_values = next_q_values.masked_fill(
-                    next_legal_moves_masks == 0, -1e10
+            if not done:
+                # Select opponent next move
+                with torch.no_grad():
+                    opp_next_q_values = model(opp_next_state)
+                opp_next_legal_moves_mask = get_legal_moves_mask(board).to(device)
+                opp_masked_next_q_values = opp_next_q_values.masked_fill(
+                    opp_next_legal_moves_mask == 0, -1e10
                 )
-                max_next_q_values = masked_next_q_values.max(1)[0]
+                if random.random() > epsilon:
+                    opp_action = opp_masked_next_q_values.max(1)[1].view(1, 1)
+                else:
+                    opp_action = torch.multinomial(
+                        F.softmax(opp_masked_next_q_values, dim=-1), 1
+                    )
+                # Take opponent action
+                opp_move = index_to_move(opp_action, board)
+                if opp_move is None:
+                    logger.warning("Invalid opponent move selected!")
+                    break
+                # Calculate reward for opponent move
+                opp_reward = calculate_reward(board, opp_move)
+                board.push(opp_move)
 
-            # Compute target Q-values
+                # Compute the next-state max Q-value for active player
+                next_state = board_to_tensor(board, board.turn).to(device)
+                next_state = next_state.unsqueeze(0)
+                next_q_values = model(next_state)
+                # Roll back the board state
+                board.pop()
+                next_legal_moves_mask = get_legal_moves_mask(board).to(device)
+                masked_next_q_values = next_q_values.masked_fill(
+                    next_legal_moves_mask == 0, -1e10
+                )
+                max_next_q_values = masked_next_q_values.max(1)[0].detach()
+            else:
+                max_next_q_values = torch.tensor([0.0], device=device)
+            # Compute the target Q-value
             target_q_values = (
-                rewards - opp_rewards + (gamma * max_next_q_values * (1 - dones))
+                reward - opp_reward + (gamma * max_next_q_values * (1 - done))
             )
-            predicted_q = predicted_q_values.gather(1, valid_actions)
+            predicted_q = predicted_q_values.gather(1, action)
 
             # Compute loss
             loss = (
@@ -239,12 +225,20 @@ def train_deep_q_network(
             )
             moves += 1
 
-            if moves % app_config.MODEL_GRAD_STEPS == 0:
+            if episode % 100 == 0:
+                write_log(
+                    model_timestamp=model_timestamp,
+                    board=board,
+                    move=move,
+                    score=predicted_q.item(),
+                    episode=episode,
+                    total_loss=total_loss,
+                    loss=loss.item(),
+                )
+            if moves % app_config.MODEL_GRAD_STEPS == 0 or done:
                 # Gradient accumulation
                 optimizer.step()
                 optimizer.zero_grad()
-
-            active_games = sum(1 for board in boards if not board.is_game_over())
 
         # Log metrics to Tensorboard
         writer.add_scalar("Loss/Episode", total_loss, episode)
@@ -299,4 +293,4 @@ if __name__ == "__main__":
         dropout=0.1,
         freeze_pos=True,
     )
-    train_deep_q_network(model, episodes=50000, batch_size=64, app_config=app_config)
+    train_deep_q_network(model, episodes=50000, app_config=app_config)
