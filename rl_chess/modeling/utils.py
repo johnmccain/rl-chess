@@ -149,7 +149,7 @@ def index_to_move(index: int, board: chess.Board) -> chess.Move | None:
         if (board.turn == chess.WHITE and chess.square_rank(to_square) == 7) or (
             board.turn == chess.BLACK and chess.square_rank(to_square) == 0
         ):
-            logger.info("Promoting pawn")
+            logger.debug("Promoting pawn")
             promotion_piece = chess.QUEEN
 
     # Create the move

@@ -34,6 +34,7 @@ class AppConfig(BaseModel):
     MODEL_INITIAL_GAMMA: float = config["model.initial_gamma"]
     MODEL_GRAD_STEPS: int = config["model.grad_steps"]
     MODEL_DECAY: float = config["model.decay"]
+    MODEL_MIN_EPSILON: float = config["model.min_epsilon"]
     MODEL_CLIP_GRAD: float = config["model.clip_grad"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]

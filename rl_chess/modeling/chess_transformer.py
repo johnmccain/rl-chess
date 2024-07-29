@@ -75,6 +75,7 @@ class ChessTransformer(nn.Module):
         num_layers: int,
         dim_feedforward: int,
         dropout: float,
+        freeze_pos: bool = True,
     ):
         super(ChessTransformer, self).__init__()
         self.d_model = d_model
@@ -82,9 +83,10 @@ class ChessTransformer(nn.Module):
         self.num_layers = num_layers
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
+        self.freeze_pos = freeze_pos
 
         self.embedding = ChessTransformerEmbeddings(
-            vocab_size=self.VOCAB_SIZE, d_model=d_model
+            vocab_size=self.VOCAB_SIZE, d_model=d_model, freeze_pos=freeze_pos
         )
         self.layers = nn.ModuleList(
             nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout)
@@ -99,6 +101,7 @@ class ChessTransformer(nn.Module):
             "num_layers": self.num_layers,
             "dim_feedforward": self.dim_feedforward,
             "dropout": self.dropout,
+            "freeze_pos": self.freeze_pos,
         }
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

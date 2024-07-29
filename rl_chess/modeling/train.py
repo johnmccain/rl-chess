@@ -1,4 +1,5 @@
 import datetime
+import logging
 import random
 
 import chess
@@ -18,6 +19,15 @@ from rl_chess.modeling.utils import (
     get_legal_moves_mask,
     index_to_move,
 )
+
+app_config = AppConfig()
+
+logging.basicConfig(
+    level=app_config.LOG_LEVEL,
+    format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+)
+
+logger = logging.getLogger(__name__)
 
 
 def write_log(
@@ -48,6 +58,9 @@ def train_deep_q_network(
     model.to(device)
 
     optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=episodes, eta_min=1e-6
+    )
     # optimizer = torch_optimizer.Ranger(model.parameters(), lr=app_config.MODEL_LR)
 
     loss_fn = F.mse_loss
@@ -112,7 +125,7 @@ def train_deep_q_network(
             # Take action and observe reward and next state
             move = index_to_move(action, board)
             if move is None:
-                print("Invalid move selected!")
+                logger.warning("Invalid move selected!")
                 break
             reward = calculate_reward(board, move)
 
@@ -170,9 +183,10 @@ def train_deep_q_network(
         writer.add_scalar("Epsilon/Episode", epsilon, episode)
         writer.add_scalar("Moves/Episode", moves, episode)
         writer.add_scalar("Gamma/Episode", gamma, episode)
+        writer.add_scalar("LR/Episode", scheduler.get_last_lr()[0], episode)
 
         if episode % 10 == 0:
-            print(
+            logger.info(
                 f"Episode {episode}, Loss: {total_loss}, Moves: {moves}, Loss/move: {total_loss / moves}"
             )
 
@@ -185,15 +199,18 @@ def train_deep_q_network(
             )
 
         # Epsilon decay
-        epsilon = max(epsilon * app_config.MODEL_DECAY, 0.01)
+        epsilon = max(epsilon * app_config.MODEL_DECAY, app_config.MODEL_MIN_EPSILON)
+
+        # Learning rate scheduler
+        scheduler.step()
 
     writer.close()
-    print("Training complete")
+    logger.info("Training complete")
     model_output_path = (
         base_path / app_config.APP_OUTPUT_DIR / f"model_{model_timestamp}_final.pt"
     )
     torch.save(model.state_dict(), model_output_path)
-    print(f"Model saved to {model_output_path}")
+    logger.info(f"Model saved to {model_output_path}")
 
 
 if __name__ == "__main__":
@@ -204,5 +221,6 @@ if __name__ == "__main__":
         num_layers=4,
         dim_feedforward=512,
         dropout=0.1,
+        freeze_pos=False,
     )
-    train_deep_q_network(model, episodes=10000, app_config=app_config)
+    train_deep_q_network(model, episodes=50000, app_config=app_config)
