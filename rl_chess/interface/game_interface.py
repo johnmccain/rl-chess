@@ -1,9 +1,15 @@
+import functools
 import logging
+import random
+import time
+from typing import Literal
 
 import chess
-import pygame
+import pygame as pg
+import pygame_widgets.button
 
 from rl_chess import base_path
+from rl_chess.inference.inference import ChessAgent
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +25,12 @@ class GameInterface:
 
     def __init__(
         self,
-        font: pygame.font.Font | None = None,
+        font: pg.font.Font | None = None,
     ) -> None:
         pass
 
-        self.font = font or pygame.font.SysFont("Courier New", 32, bold=True)
-        self.screen = pygame.display.set_mode(
+        self.font = font or pg.font.SysFont("Courier New", 32, bold=True)
+        self.screen = pg.display.set_mode(
             [
                 self.SQUARE_SIZE * 8 + self.FONT_PADDING,
                 self.SQUARE_SIZE * 8 + self.FONT_PADDING,
@@ -32,7 +38,7 @@ class GameInterface:
         )
         self.piece_images = self._load_images()
 
-    def _load_images(self) -> dict[str, pygame.surface.Surface]:
+    def _load_images(self) -> dict[str, pg.surface.Surface]:
         # load images
         symbol_to_image_path = {
             "b": "img/black_bishop.png",
@@ -50,7 +56,7 @@ class GameInterface:
         }
 
         piece_images = {
-            piece: pygame.image.load(str(base_path / path))
+            piece: pg.image.load(str(base_path / path))
             for piece, path in symbol_to_image_path.items()
         }
         return piece_images
@@ -66,9 +72,9 @@ class GameInterface:
         """
         return tuple(int(color1[i] * alpha + color2[i] * (1 - alpha)) for i in range(3))
 
-    def get_victory_banner(self, outcome: chess.Outcome) -> pygame.surface.Surface:
+    def get_victory_banner(self, outcome: chess.Outcome) -> pg.surface.Surface:
         logger.info(f"Game over: {outcome}")
-        banner = pygame.Surface((512, 512))
+        banner = pg.Surface((512, 512))
         banner.set_alpha(192)
         if outcome.winner == chess.WHITE:
             banner.fill((255, 255, 255))
@@ -110,10 +116,10 @@ class GameInterface:
                 color = self.LIGHT_SQUARE_COLOR
             else:
                 color = self.DARK_SQUARE_COLOR
-            pygame.draw.rect(
+            pg.draw.rect(
                 self.screen,
                 color,
-                pygame.Rect(
+                pg.Rect(
                     self.FONT_PADDING / 2 + self.SQUARE_SIZE * col,
                     self.FONT_PADDING / 2 + self.SQUARE_SIZE * (7 - row),
                     self.SQUARE_SIZE,
@@ -164,10 +170,10 @@ class GameInterface:
         orig_square_color = (
             self.LIGHT_SQUARE_COLOR if (row + col) % 2 == 0 else self.DARK_SQUARE_COLOR
         )
-        pygame.draw.rect(
+        pg.draw.rect(
             self.screen,
             self.mix_color(highlight_tint, orig_square_color),
-            pygame.Rect(
+            pg.Rect(
                 self.FONT_PADDING / 2 + self.SQUARE_SIZE * col,
                 self.FONT_PADDING / 2 + self.SQUARE_SIZE * (7 - row),
                 self.SQUARE_SIZE,
@@ -201,6 +207,76 @@ class GameInterface:
                     ),
                 )
 
+    def select_color(self) -> chess.Color:
+        selected_color: chess.Color | str | None = None
+
+        def on_click(action: Literal["white", "black", "random"]) -> None:
+            nonlocal selected_color
+            match action:
+                case "white":
+                    selected_color = chess.WHITE
+                case "black":
+                    selected_color = chess.BLACK
+                case "random":
+                    selected_color = random.choice([chess.WHITE, chess.BLACK])
+
+        white_button = pygame_widgets.button.Button(
+            self.screen,
+            x=150,
+            y=50,
+            width=250,
+            height=125,
+            text="white",
+            fontSize=50,
+            margin=20,
+            inactiveColour=(255, 255, 255),
+            pressedColour=(64, 64, 64),
+            radius=5,
+            onClick=functools.partial(on_click, "white"),
+        )
+
+        black_button = pygame_widgets.button.Button(
+            self.screen,
+            x=150,
+            y=200,
+            width=250,
+            height=125,
+            text="black",
+            fontSize=50,
+            margin=20,
+            inactiveColour=(255, 255, 255),
+            pressedColour=(64, 64, 64),
+            radius=5,
+            onClick=functools.partial(on_click, "black"),
+        )
+
+        random_button = pygame_widgets.button.Button(
+            self.screen,
+            x=150,
+            y=350,
+            width=250,
+            height=125,
+            text="random",
+            fontSize=50,
+            margin=20,
+            inactiveColour=(255, 255, 255),
+            pressedColour=(64, 64, 64),
+            radius=5,
+            onClick=functools.partial(on_click, "random"),
+        )
+
+        while selected_color is None:
+            events = pg.event.get()
+            for event in events:
+                if event.type == pg.QUIT:
+                    selected_color = chess.WHITE
+            pygame_widgets.update(events)
+            white_button.draw()
+            black_button.draw()
+            random_button.draw()
+            pg.display.update()
+        return selected_color
+
     def update_display(
         self,
         board: chess.Board,
@@ -215,23 +291,40 @@ class GameInterface:
             outcome = board.outcome()
             banner = self.get_victory_banner(outcome)
             self.screen.blit(banner, (self.FONT_PADDING / 2, self.FONT_PADDING / 2))
-        pygame.display.flip()
+        pg.display.flip()
 
 
 class GameRunner:
-    def __init__(self) -> None:
-        pygame.init()
-        pygame.font.init()
+    def __init__(
+        self,
+        board: chess.Board | None = None,
+        chess_agent: ChessAgent | None = None,
+        game_interface: GameInterface | None = None,
+    ) -> None:
+        pg.init()
+        pg.font.init()
 
-        self.board = chess.Board()
-        self.game_interface = GameInterface()
+        self.board = board or chess.Board()
+        self.chess_agent = chess_agent or ChessAgent()
+        self.game_interface = game_interface or GameInterface()
         self.selected_square = None
         self.running = True
+
+    def create_move(
+        self, board: chess.Board, start_square: chess.Square, end_square: chess.Square
+    ) -> chess.Move:
+        # Check for promotion
+        if board.piece_at(start_square) == chess.Piece(chess.PAWN, board.turn):
+            if chess.square_rank(end_square) in (0, 7):
+                return chess.Move(start_square, end_square, promotion=chess.QUEEN)
+        return chess.Move(start_square, end_square)
 
     def handle_mouseup(self, xpos: int, ypos: int) -> None:
         logger.debug(f"Mouse up at ({xpos}, {ypos})")
         square = self.game_interface.get_square(xpos, ypos, self.board.turn)
-        if self.selected_square is None:
+        if square is None:
+            logger.debug("Mouse up off the board")
+        elif self.selected_square is None:
             # select a new piece
             piece = self.board.piece_at(square)
             if piece is not None and self.board.turn == piece.color:
@@ -239,7 +332,7 @@ class GameRunner:
                 self.selected_square = square
         else:
             # move the selected piece (if the move is legal)
-            move = chess.Move(self.selected_square, square)
+            move = self.create_move(self.board, self.selected_square, square)
             if move in self.board.legal_moves:
                 logger.info(f"Moving piece from {self.selected_square} to {square}")
                 self.board.push(move)
@@ -247,16 +340,23 @@ class GameRunner:
                 logger.info(f"Selected invalid move: {move}")
             self.selected_square = None
 
+    def ai_move(self, board: chess.Board) -> None:
+        move = self.chess_agent.select_top_rated_move(board)
+        board.push(move)
+        time.sleep(1)
+
     def run(self) -> None:
+        player_color = self.game_interface.select_color()
         while self.running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    logger.info("Quitting game")
-                    self.running = False
-                elif event.type == pygame.MOUSEBUTTONUP:
-                    self.handle_mouseup(*pygame.mouse.get_pos())
             self.game_interface.update_display(
                 board=self.board, selected_square=self.selected_square
             )
-
-        pygame.quit()
+            for event in pg.event.get():
+                if event.type == pg.QUIT:
+                    logger.info("Quitting game")
+                    self.running = False
+                elif event.type == pg.MOUSEBUTTONUP and self.board.turn == player_color:
+                    self.handle_mouseup(*pg.mouse.get_pos())
+                elif self.board.turn != player_color and not self.board.is_game_over():
+                    self.ai_move(self.board)
+        pg.quit()

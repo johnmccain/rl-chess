@@ -24,7 +24,7 @@ class AppConfig(BaseModel):
     APP_OUTPUT_DIR: str = config["app.output_dir"]
     APP_TENSORBOARD_DIR: str = config["app.tensorboard_dir"]
     APP_SAVE_STEPS: int = config["app.save_steps"]
-    APP_MODEL_NAME = config["app.model_name"]
+    APP_MODEL_NAME: str = config["app.model_name"]
 
     LOG_LEVEL: str = config["log.level"]
 
