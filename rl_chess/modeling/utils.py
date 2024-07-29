@@ -1,28 +1,45 @@
+import logging
+
 import chess
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def material_balance(board: chess.Board):
     white = board.occupied_co[chess.WHITE]
     black = board.occupied_co[chess.BLACK]
     return (
-        chess.popcount(white & board.pawns)
-        - chess.popcount(black & board.pawns)
-        + 3
-        * (
-            chess.popcount(white & board.knights)
-            - chess.popcount(black & board.knights)
+        (chess.popcount(white & board.pawns) - chess.popcount(black & board.pawns))
+        + (
+            3
+            * (
+                chess.popcount(white & board.knights)
+                - chess.popcount(black & board.knights)
+            )
         )
-        + 3
-        * (
-            chess.popcount(white & board.bishops)
-            - chess.popcount(black & board.bishops)
+        + (
+            3
+            * (
+                chess.popcount(white & board.bishops)
+                - chess.popcount(black & board.bishops)
+            )
         )
-        + 5
-        * (chess.popcount(white & board.rooks) - chess.popcount(black & board.rooks))
-        + 9
-        * (chess.popcount(white & board.queens) - chess.popcount(black & board.queens))
+        + (
+            5
+            * (
+                chess.popcount(white & board.rooks)
+                - chess.popcount(black & board.rooks)
+            )
+        )
+        + (
+            9
+            * (
+                chess.popcount(white & board.queens)
+                - chess.popcount(black & board.queens)
+            )
+        )
     )
 
 
@@ -128,6 +145,7 @@ def index_to_move(index: int, board: chess.Board) -> chess.Move | None:
         if (board.turn == chess.WHITE and chess.square_rank(to_square) == 7) or (
             board.turn == chess.BLACK and chess.square_rank(to_square) == 0
         ):
+            logger.info("Promoting pawn")
             promotion_piece = chess.QUEEN
 
     # Create the move
@@ -137,4 +155,5 @@ def index_to_move(index: int, board: chess.Board) -> chess.Move | None:
     if move in board.legal_moves:
         return move
     else:
+        logger.warning(f"Move {move} is not legal!")
         return None  # Returning None if the move is not legal

@@ -1,9 +1,11 @@
-import pathlib
+import logging
 
 import chess
 import pygame
 
 from rl_chess import base_path
+
+logger = logging.getLogger(__name__)
 
 
 class GameInterface:
@@ -65,6 +67,7 @@ class GameInterface:
         return tuple(int(color1[i] * alpha + color2[i] * (1 - alpha)) for i in range(3))
 
     def get_victory_banner(self, outcome: chess.Outcome) -> pygame.surface.Surface:
+        logger.info(f"Game over: {outcome}")
         banner = pygame.Surface((512, 512))
         banner.set_alpha(192)
         if outcome.winner == chess.WHITE:
@@ -226,24 +229,29 @@ class GameRunner:
         self.running = True
 
     def handle_mouseup(self, xpos: int, ypos: int) -> None:
-        xpos, ypos = pygame.mouse.get_pos()
+        logger.debug(f"Mouse up at ({xpos}, {ypos})")
         square = self.game_interface.get_square(xpos, ypos, self.board.turn)
         if self.selected_square is None:
             # select a new piece
             piece = self.board.piece_at(square)
             if piece is not None and self.board.turn == piece.color:
+                logger.info(f"Selected piece: {piece} at {square}")
                 self.selected_square = square
         else:
             # move the selected piece (if the move is legal)
             move = chess.Move(self.selected_square, square)
             if move in self.board.legal_moves:
+                logger.info(f"Moving piece from {self.selected_square} to {square}")
                 self.board.push(move)
+            else:
+                logger.info(f"Selected invalid move: {move}")
             self.selected_square = None
 
     def run(self) -> None:
         while self.running:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
+                    logger.info("Quitting game")
                     self.running = False
                 elif event.type == pygame.MOUSEBUTTONUP:
                     self.handle_mouseup(*pygame.mouse.get_pos())
