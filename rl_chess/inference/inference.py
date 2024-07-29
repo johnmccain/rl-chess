@@ -28,10 +28,7 @@ def select_top_rated_move(model: ChessTransformer, board: chess.Board) -> chess.
 
     # Generate a mask for the legal moves
     legal_moves_mask = get_legal_moves_mask(board)
-    masked_logits = logits.masked_fill(legal_moves_mask == 0, float("-inf"))
-
-    # Apply the mask to the logits
-    masked_logits = logits + legal_moves_mask
+    masked_logits = logits.masked_fill(legal_moves_mask == 0, -1e10)
 
     # Find the index of the highest scoring legal move
     best_move_index = torch.argmax(masked_logits).item()
