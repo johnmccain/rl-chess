@@ -10,10 +10,14 @@ LEVEL = "INFO"
 
 [MODEL]
 
-LR = 1e-5
-GAMMA = 0.0
+LR = 1e-4
+GAMMA = 0.95
 INITIAL_GAMMA = 0.0
 GAMMA_RAMP_STEPS = 2000
 GRAD_STEPS = 8
 DECAY = 0.995
 CLIP_GRAD = 1.0
+
+[STOCKFISH]
+
+PATH = "/Users/johnmccain/Documents/repos/rl-chess/stockfish/stockfish-macos-m1-apple-silicon"

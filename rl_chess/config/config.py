@@ -35,3 +35,5 @@ class AppConfig(BaseModel):
     MODEL_GRAD_STEPS: int = config["model.grad_steps"]
     MODEL_DECAY: float = config["model.decay"]
     MODEL_CLIP_GRAD: float = config["model.clip_grad"]
+
+    STOCKFISH_PATH: str = config["stockfish.path"]

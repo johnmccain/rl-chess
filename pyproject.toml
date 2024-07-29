@@ -21,6 +21,7 @@ dynaconf = "^3.2.6"
 numpy = "<2"
 torch-optimizer = "^0.3.0"
 pygame-widgets = "^1.1.5"
+stockfish = "^3.28.0"
 
 
 [tool.poetry.group.dev.dependencies]
