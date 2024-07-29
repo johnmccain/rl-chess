@@ -46,6 +46,8 @@ def train_deep_q_network(
     hparams.update(
         {
             "gamma": app_config.MODEL_GAMMA,
+            "initial_gamma": app_config.MODEL_INITIAL_GAMMA,
+            "gamma_ramp_steps": app_config.MODEL_GAMMA_RAMP_STEPS,
             "lr": app_config.MODEL_LR,
             "decay": app_config.MODEL_DECAY,
             "clip_grad": app_config.MODEL_CLIP_GRAD,
@@ -57,7 +59,15 @@ def train_deep_q_network(
         metric_dict={},
     )
 
+    gamma_ramp = (
+        app_config.MODEL_GAMMA - app_config.MODEL_INITIAL_GAMMA
+    ) / app_config.MODEL_GAMMA_RAMP_STEPS
+
     for episode in range(episodes):
+        gamma = min(
+            app_config.MODEL_INITIAL_GAMMA + gamma_ramp * episode,
+            app_config.MODEL_GAMMA,
+        )
         board = chess.Board()
         total_loss = 0.0
         moves = 0
@@ -72,7 +82,7 @@ def train_deep_q_network(
             # Mask illegal moves
             legal_moves_mask = get_legal_moves_mask(board).to(device)
             masked_q_values = predicted_q_values.masked_fill(
-                legal_moves_mask == 0, float("-inf")
+                legal_moves_mask == 0, -1e10
             )
 
             # Epsilon-greedy action selection
@@ -84,6 +94,9 @@ def train_deep_q_network(
 
             # Take action and observe reward and next state
             move = index_to_move(action, board)
+            if move is None:
+                print("Invalid move selected!")
+                break
             reward = calculate_reward(board, move)
 
             board.push(move)
@@ -94,34 +107,44 @@ def train_deep_q_network(
 
             # Predict next Q-values
             next_q_values = model(next_state)
-            max_next_q_values = next_q_values.max(1)[0].detach()
+
+            # Mask illegal moves
+            next_legal_moves_mask = get_legal_moves_mask(board).to(device)
+            masked_next_q_values = next_q_values.masked_fill(
+                next_legal_moves_mask == 0, -1e10
+            )
+            max_next_q_values = masked_next_q_values.max(1)[0].detach()
 
             # Compute the target Q-value
-            target_q_values = reward + (
-                app_config.MODEL_GAMMA * max_next_q_values * (1 - done)
-            )
+            target_q_values = reward + (gamma * max_next_q_values * (1 - done))
 
             # Compute loss
-            loss = loss_fn(
-                predicted_q_values.gather(1, action), target_q_values.unsqueeze(1)
+            loss = (
+                loss_fn(
+                    predicted_q_values.gather(1, action), target_q_values.unsqueeze(1)
+                )
+                / app_config.MODEL_GRAD_STEPS
             )
             total_loss += loss.item()
 
             # Backpropagation
-            optimizer.zero_grad()
             loss.backward()
             # Apply gradient clipping
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), app_config.MODEL_CLIP_GRAD
             )
-            optimizer.step()
             moves += 1
+            if moves % app_config.MODEL_GRAD_STEPS == 0 or done:
+                # Gradient accumulation
+                optimizer.step()
+                optimizer.zero_grad()
 
         # Log metrics to Tensorboard
         writer.add_scalar("Loss/Episode", total_loss, episode)
         writer.add_scalar("Loss/Move", total_loss / moves, episode)
         writer.add_scalar("Epsilon/Episode", epsilon, episode)
         writer.add_scalar("Moves/Episode", moves, episode)
+        writer.add_scalar("Gamma/Episode", gamma, episode)
 
         if episode % 10 == 0:
             print(
@@ -151,10 +174,10 @@ def train_deep_q_network(
 if __name__ == "__main__":
     app_config = AppConfig()
     model = ChessTransformer(
-        d_model=128,
+        d_model=256,
         nhead=8,
         num_layers=4,
-        dim_feedforward=256,
+        dim_feedforward=512,
         dropout=0.1,
     )
-    train_deep_q_network(model, episodes=5000, app_config=app_config)
+    train_deep_q_network(model, episodes=10000, app_config=app_config)

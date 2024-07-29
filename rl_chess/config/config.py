@@ -26,6 +26,9 @@ class AppConfig(BaseModel):
     APP_SAVE_STEPS: int = config["app.save_steps"]
 
     MODEL_LR: float = config["model.lr"]
+    MODEL_GAMMA_RAMP_STEPS: int = config["model.gamma_ramp_steps"]
     MODEL_GAMMA: float = config["model.gamma"]
+    MODEL_INITIAL_GAMMA: float = config["model.initial_gamma"]
+    MODEL_GRAD_STEPS: int = config["model.grad_steps"]
     MODEL_DECAY: float = config["model.decay"]
     MODEL_CLIP_GRAD: float = config["model.clip_grad"]
