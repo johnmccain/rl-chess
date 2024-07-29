@@ -78,6 +78,10 @@ def calculate_reward(board: chess.Board, move: chess.Move) -> float:
     player = board.turn
     board.push(move)
     reward = evaluate_fitness(board, player)
+    # scale the reward to [-1, 1]
+    reward = np.tanh(
+        reward / 68
+    )  # 68 for scaling denominator so that checkmate is approximately +/-0.9 after tanh scaling
     board.pop()
     return reward
 
