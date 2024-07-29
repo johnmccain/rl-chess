@@ -25,6 +25,8 @@ class AppConfig(BaseModel):
     APP_TENSORBOARD_DIR: str = config["app.tensorboard_dir"]
     APP_SAVE_STEPS: int = config["app.save_steps"]
 
+    LOG_LEVEL: str = config["log.level"]
+
     MODEL_LR: float = config["model.lr"]
     MODEL_GAMMA_RAMP_STEPS: int = config["model.gamma_ramp_steps"]
     MODEL_GAMMA: float = config["model.gamma"]

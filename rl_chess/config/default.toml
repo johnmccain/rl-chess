@@ -3,6 +3,11 @@ TENSORBOARD_DIR = "tensorboard"
 OUTPUT_DIR = "out"
 SAVE_STEPS = 500
 
+MODEL_NAME = "model_20240728-182541_final.pt"
+
+[LOG]
+LEVEL = "INFO"
+
 [MODEL]
 
 LR = 1e-5
