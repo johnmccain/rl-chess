@@ -54,7 +54,7 @@ def evaluate_fitness(board: chess.Board, player: chess.Color) -> float:
 
     # Checkmate
     if board.is_checkmate():
-        return 1000 if board.turn == player else -1000
+        return 100 if board.turn == player else -100
 
     # Stalemate
     if board.is_stalemate():
