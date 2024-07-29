@@ -128,25 +128,56 @@ def train_deep_q_network(
                 logger.warning("Invalid move selected!")
                 break
             reward = calculate_reward(board, move)
+            # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
+            opp_reward = calculate_reward(board, move, flip_perspective=True)
 
+            # Take the action
             board.push(move)
-            next_state = board_to_tensor(board, board.turn).to(device)
-            next_state = next_state.unsqueeze(0)
+            opp_next_state = board_to_tensor(board, board.turn).to(device)
+            opp_next_state = opp_next_state.unsqueeze(0)
 
             done = torch.tensor([int(board.is_game_over())], device=device)
 
-            # Predict next Q-values
-            next_q_values = model(next_state)
+            if not done:
+                # Select opponent next move
+                with torch.no_grad():
+                    opp_next_q_values = model(opp_next_state)
+                opp_next_legal_moves_mask = get_legal_moves_mask(board).to(device)
+                opp_masked_next_q_values = opp_next_q_values.masked_fill(
+                    opp_next_legal_moves_mask == 0, -1e10
+                )
+                if random.random() > epsilon:
+                    opp_action = opp_masked_next_q_values.max(1)[1].view(1, 1)
+                else:
+                    opp_action = torch.multinomial(
+                        F.softmax(opp_masked_next_q_values, dim=-1), 1
+                    )
+                # Take opponent action
+                opp_move = index_to_move(opp_action, board)
+                if opp_move is None:
+                    logger.warning("Invalid opponent move selected!")
+                    break
+                # Calculate reward for opponent move
+                opp_reward = calculate_reward(board, opp_move)
+                board.push(opp_move)
 
-            # Mask illegal moves
-            next_legal_moves_mask = get_legal_moves_mask(board).to(device)
-            masked_next_q_values = next_q_values.masked_fill(
-                next_legal_moves_mask == 0, -1e10
-            )
-            max_next_q_values = masked_next_q_values.max(1)[0].detach()
-
+                # Compute the next-state max Q-value for active player
+                next_state = board_to_tensor(board, board.turn).to(device)
+                next_state = next_state.unsqueeze(0)
+                next_q_values = model(next_state)
+                # Roll back the board state
+                board.pop()
+                next_legal_moves_mask = get_legal_moves_mask(board).to(device)
+                masked_next_q_values = next_q_values.masked_fill(
+                    next_legal_moves_mask == 0, -1e10
+                )
+                max_next_q_values = masked_next_q_values.max(1)[0].detach()
+            else:
+                max_next_q_values = torch.tensor([0.0], device=device)
             # Compute the target Q-value
-            target_q_values = reward + (gamma * max_next_q_values * (1 - done))
+            target_q_values = (
+                reward - opp_reward + (gamma * max_next_q_values * (1 - done))
+            )
             predicted_q = predicted_q_values.gather(1, action)
 
             # Compute loss
@@ -221,6 +252,6 @@ if __name__ == "__main__":
         num_layers=4,
         dim_feedforward=512,
         dropout=0.1,
-        freeze_pos=False,
+        freeze_pos=True,
     )
     train_deep_q_network(model, episodes=50000, app_config=app_config)

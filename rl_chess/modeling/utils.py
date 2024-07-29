@@ -71,11 +71,15 @@ def evaluate_fitness(board: chess.Board, player: chess.Color) -> float:
     return material
 
 
-def calculate_reward(board: chess.Board, move: chess.Move) -> float:
+def calculate_reward(
+    board: chess.Board, move: chess.Move, flip_perspective: bool = False
+) -> float:
     """
     Calculate the reward for a given move on the board, but without actually making the move.
     """
     player = board.turn
+    if flip_perspective:
+        player = not player
     board.push(move)
     reward = evaluate_fitness(board, player)
     # scale the reward to [-1, 1]
