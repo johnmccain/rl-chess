@@ -20,6 +20,23 @@ from rl_chess.modeling.utils import (
 )
 
 
+def write_log(
+    board: chess.Board,
+    move: chess.Move,
+    score: float,
+    episode: int,
+    total_loss: float,
+    loss: float,
+):
+    """
+    Detailed move-by-move logging for debugging.
+    """
+    with open("log.csv", "a") as f:
+        f.write(
+            f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}, {episode}, Board('{board.fen()}'), Move('{move}'), {score}, {total_loss}, {loss}\n"
+        )
+
+
 def train_deep_q_network(
     model: ChessTransformer,
     episodes: int,
@@ -77,7 +94,7 @@ def train_deep_q_network(
             current_state = current_state.unsqueeze(0)  # Batch size of 1
 
             # Predict Q-values
-            predicted_q_values = model(current_state)
+            predicted_q_values: torch.Tensor = model(current_state)
 
             # Mask illegal moves
             legal_moves_mask = get_legal_moves_mask(board).to(device)
@@ -117,12 +134,11 @@ def train_deep_q_network(
 
             # Compute the target Q-value
             target_q_values = reward + (gamma * max_next_q_values * (1 - done))
+            predicted_q = predicted_q_values.gather(1, action)
 
             # Compute loss
             loss = (
-                loss_fn(
-                    predicted_q_values.gather(1, action), target_q_values.unsqueeze(1)
-                )
+                loss_fn(predicted_q, target_q_values.unsqueeze(1))
                 / app_config.MODEL_GRAD_STEPS
             )
             total_loss += loss.item()
@@ -134,6 +150,15 @@ def train_deep_q_network(
                 model.parameters(), app_config.MODEL_CLIP_GRAD
             )
             moves += 1
+
+            # write_log(
+            #     board=board,
+            #     move=move,
+            #     score=predicted_q.item(),
+            #     episode=episode,
+            #     total_loss=total_loss,
+            #     loss=loss.item(),
+            # )
             if moves % app_config.MODEL_GRAD_STEPS == 0 or done:
                 # Gradient accumulation
                 optimizer.step()
