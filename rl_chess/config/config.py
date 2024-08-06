@@ -39,3 +39,4 @@ class AppConfig(BaseModel):
     MODEL_MAX_MOVES: int = config["model.max_moves"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]
+    STOCKFISH_PROB: float = config["stockfish.prob"]
