@@ -18,6 +18,7 @@ from rl_chess.modeling.utils import (
     get_legal_moves_mask,
     index_to_move,
 )
+from rl_chess.evaluation.stockfish_evaluator import StockfishEvaluator
 
 app_config = AppConfig()
 
@@ -61,6 +62,8 @@ def train_deep_q_network(
     episodes: int,
     app_config: AppConfig = AppConfig(),
 ):
+    stockfish_evaluator = StockfishEvaluator()
+    stockfish_evaluator.set_depth(10)
     openings_df = pd.read_csv(base_path / "data/openings_fen7.csv")
     model_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     if torch.cuda.is_available():
@@ -148,6 +151,10 @@ def train_deep_q_network(
             # Epsilon-greedy action selection
             if random.random() > epsilon:
                 action = masked_q_values.max(1)[1].view(1, 1)
+            elif random.random() < app_config.STOCKFISH_PROB:
+                action = torch.tensor(
+                    [stockfish_evaluator.take_action(board)], device=device
+                ).unsqueeze(0)
             else:
                 # Select action randomly with softmax
                 action = torch.multinomial(F.softmax(masked_q_values, dim=-1), 1)
@@ -178,6 +185,10 @@ def train_deep_q_network(
                 )
                 if random.random() > epsilon:
                     opp_action = opp_masked_next_q_values.max(1)[1].view(1, 1)
+                elif random.random() < app_config.STOCKFISH_PROB:
+                    opp_action = torch.tensor(
+                        [stockfish_evaluator.take_action(board)], device=device
+                    ).unsqueeze(0)
                 else:
                     opp_action = torch.multinomial(
                         F.softmax(opp_masked_next_q_values, dim=-1), 1

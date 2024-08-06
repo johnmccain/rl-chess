@@ -6,14 +6,17 @@ import torch
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
 from rl_chess.modeling.chess_transformer import ChessTransformer
+from rl_chess.modeling.chess_cnn import ChessCNN
 from rl_chess.modeling.utils import board_to_tensor, get_legal_moves_mask, index_to_move
 
 logger = logging.getLogger(__name__)
 
 
 class ChessAgent:
-    def __init__(self, app_config: AppConfig = AppConfig()):
-        self.model = self.load_model(app_config)
+    def __init__(self, app_config: AppConfig = AppConfig(), device: str = "cpu") -> None:
+        self.model: ChessTransformer | ChessCNN = self.load_cnn_model(app_config)
+        self.device = torch.device(device)
+        self.model.to(self.device)
 
     def load_model(self, app_config: AppConfig = AppConfig()) -> ChessTransformer:
         """
@@ -41,6 +44,26 @@ class ChessAgent:
         model.eval()
         return model
 
+    def load_cnn_model(self, app_config: AppConfig = AppConfig()) -> ChessCNN:
+        """
+        Load a trained ChessCNN model from disk.
+
+        :param app_config: The application configuration.
+
+        :returns: The trained ChessCNN model.
+        """
+        model = ChessCNN(num_filters=256, num_residual_blocks=12)
+        logger.info(
+            f"Loading model from {base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME}"
+        )
+        model.load_state_dict(
+            torch.load(
+                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME
+            )
+        )
+        model.eval()
+        return model
+
     def select_top_rated_move(self, board: chess.Board) -> chess.Move:
         """
         Perform inference using the ChessTransformer model and return the best legal move.
@@ -52,7 +75,7 @@ class ChessAgent:
         """
 
         # Convert the current board state to a tensor
-        current_state = board_to_tensor(board, board.turn)
+        current_state = board_to_tensor(board, board.turn).to(self.device)
         current_state = current_state.unsqueeze(0)  # Add a batch dimension
 
         with torch.no_grad():  # Disable gradient computation for inference
@@ -61,7 +84,7 @@ class ChessAgent:
             logits = logits.view(-1)  # Flatten the logits
 
         # Generate a mask for the legal moves
-        legal_moves_mask = get_legal_moves_mask(board)
+        legal_moves_mask = get_legal_moves_mask(board).to(self.device)
         masked_logits = logits.masked_fill(legal_moves_mask == 0, -1e10)
 
         # Find the index of the highest scoring legal move
