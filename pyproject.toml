@@ -8,13 +8,17 @@ packages = [
     { include = "rl_chess", from = "." },
 ]
 
+[[tool.poetry.source]]
+name = "pytorch-gpu-src"
+url = "https://download.pytorch.org/whl/cu118"
+priority = "explicit"
+
 [tool.isort]
 profile = "black"
 
 [tool.poetry.dependencies]
 python = "^3.11"
 chess = "^1.10.0"
-torch = "^2.4.0"
 pygame = "^2.6.0"
 pydantic = "^2.8.2"
 dynaconf = "^3.2.6"
@@ -22,6 +26,7 @@ numpy = "<2"
 torch-optimizer = "^0.3.0"
 pygame-widgets = "^1.1.5"
 stockfish = "^3.28.0"
+torch = {version = "^2.4.0+cu118", source = "pytorch-gpu-src"}
 
 
 [tool.poetry.group.dev.dependencies]
@@ -36,6 +41,7 @@ gitignore-parser = "^0.1.11"
 tensorboard = "^2.17.0"
 torch-tb-profiler = "^0.4.3"
 pandas = "^2.2.2"
+pylance = "^0.15.0"
 
 [build-system]
 requires = ["poetry-core"]
