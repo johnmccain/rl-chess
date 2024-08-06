@@ -26,3 +26,4 @@ MAX_MOVES = 100
 # PATH = "/Users/johnmccain/Documents/repos/rl-chess/stockfish/stockfish-macos-m1-apple-silicon"
 PATH = "C:/Users/John/Documents/repos/rl-chess/stockfish/stockfish-windows-x86-64-avx2.exe"
 PROB = 0.15
+DEPTH = 10
