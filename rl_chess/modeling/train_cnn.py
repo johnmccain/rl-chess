@@ -57,9 +57,11 @@ def write_log(
 class ExperienceRecord:
     q_diff: float
     state: torch.Tensor = field(compare=False)
+    legal_moves_mask: torch.Tensor = field(compare=False)
     action: torch.Tensor = field(compare=False)
     reward: float = field(compare=False)
     next_state: torch.Tensor = field(compare=False)
+    next_legal_moves_mask: torch.Tensor = field(compare=False)
     done: bool = field(compare=False)
 
 
@@ -361,16 +363,18 @@ class CNNTrainer:
 
                 logger.debug("START Creating ExperienceRecord")
                 # Create separate ExperienceRecord for each board
-                for current_state, action, reward, next_state, done, predicted_q, target_q_value in zip(
-                    current_states, actions, rewards, next_states, dones, predicted_q, target_q_value
+                for current_state, legal_mask, action, reward, next_state, next_legal_mask, done, predicted_q, target_q_value in zip(
+                    current_states, legal_moves_mask, actions, rewards, next_states, next_legal_moves_mask, dones, predicted_q, target_q_value
                 ):
                     experience_buffer.append(
                         ExperienceRecord(
                             q_diff=(predicted_q - target_q_value).item(),
                             state=current_state,
+                            legal_moves_mask=legal_mask,
                             action=action,
                             reward=reward,
                             next_state=next_state,
+                            next_legal_moves_mask=next_legal_mask,
                             done=bool(done),
                         )
                     )
@@ -415,7 +419,11 @@ class CNNTrainer:
             predicted_q_values = model(state_batch)
             predicted_q = predicted_q_values.gather(1, action_batch)
 
-            max_next_q_values = model(next_state_batch).max(1)[0].detach()
+            next_q_values = model(next_state_batch)
+            masked_next_q_values = next_q_values.masked_fill(
+                torch.stack([exp.next_legal_moves_mask for exp in batch], dim=0).to(self.device) == 0, -1e10
+            )
+            max_next_q_values = masked_next_q_values.max(1)[0].detach()
 
             target_q_values = reward_batch + (
                 gamma * max_next_q_values * (1 - done_batch)
