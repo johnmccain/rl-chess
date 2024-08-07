@@ -28,6 +28,8 @@ pygame-widgets = "^1.1.5"
 stockfish = "^3.28.0"
 torch = {version = "^2.4.0+cu118", source = "pytorch-gpu-src"}
 tqdm = "^4.66.5"
+scikit-learn = "^1.5.1"
+pandas = "^2.2.2"
 
 
 [tool.poetry.group.dev.dependencies]

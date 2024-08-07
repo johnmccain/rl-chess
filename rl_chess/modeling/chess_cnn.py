@@ -22,7 +22,11 @@ class ChessCNN(nn.Module):
         self.policy_conv = nn.Conv2d(num_filters, 2, kernel_size=1)
         self.policy_fc = nn.Linear(2 * 64, 4096)
 
-    def forward(self, x):
+        # Auxiliary head (move legality)
+        self.auxiliary_conv = nn.Conv2d(num_filters, 2, kernel_size=1)
+        self.auxiliary_fc = nn.Linear(2 * 64, 4096)
+
+    def forward(self, x) -> tuple[torch.Tensor, torch.Tensor]:
         # x shape: (batch_size, 64)
         x = self.preprocess_input(x)  # shape: (batch_size, 12, 8, 8)
 
@@ -35,7 +39,11 @@ class ChessCNN(nn.Module):
         policy = policy.view(policy.size(0), -1)
         q_values = self.policy_fc(policy)
 
-        return q_values
+        auxiliary = F.relu(self.auxiliary_conv(x))
+        auxiliary = auxiliary.view(auxiliary.size(0), -1)
+        auxiliary_logits = self.auxiliary_fc(auxiliary)
+
+        return q_values, auxiliary_logits
 
     def preprocess_input(self, x):
         # x shape: (batch_size, 64)

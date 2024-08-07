@@ -1,3 +1,5 @@
+import os
+import pathlib
 import collections
 import datetime
 import logging
@@ -12,6 +14,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from sklearn.metrics import precision_score, recall_score
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
@@ -63,6 +66,43 @@ class ExperienceRecord:
     next_state: torch.Tensor = field(compare=False)
     next_legal_moves_mask: torch.Tensor = field(compare=False)
     done: bool = field(compare=False)
+    pred_q_values: torch.Tensor | None = field(default=None, compare=False)
+    max_next_q: float | None = field(default=None, compare=False)
+
+    def make_serializeable(self) -> dict:
+        """
+        Make efficiently serializable by converting tensors to numpy arrays and converting to dictionary.
+        """
+        return {
+            "q_diff": self.q_diff,
+            "state": self.state.cpu().numpy(),
+            "legal_moves_mask": self.legal_moves_mask.cpu().numpy(),
+            "action": self.action.cpu().numpy(),
+            "reward": self.reward,
+            "next_state": self.next_state.cpu().numpy(),
+            "next_legal_moves_mask": self.next_legal_moves_mask.cpu().numpy(),
+            "done": self.done,
+            "pred_q_values": self.pred_q_values.cpu().numpy() if self.pred_q_values is not None else None,
+            "max_next_q": self.max_next_q,
+        }
+
+    @classmethod
+    def from_serialized(cls, serialized: dict) -> "ExperienceRecord":
+        """
+        Load a serialized ExperienceRecord from a dictionary by converting numpy arrays back to tensors.
+        """
+        return cls(
+            q_diff=serialized["q_diff"],
+            state=torch.tensor(serialized["state"]),
+            legal_moves_mask=torch.tensor(serialized["legal_moves_mask"]),
+            action=torch.tensor(serialized["action"]),
+            reward=serialized["reward"],
+            next_state=torch.tensor(serialized["next_state"]),
+            next_legal_moves_mask=torch.tensor(serialized["next_legal_moves_mask"]),
+            done=serialized["done"],
+            pred_q_values=torch.tensor(serialized["pred_q_values"]) if serialized["pred_q_values"] is not None else None,
+            max_next_q=serialized["max_next_q"],
+        )
 
 
 class ExperienceBuffer:
@@ -139,31 +179,52 @@ class CNNTrainer:
             return None
         return max([int(f.stem.split("_e")[-1]) for f in model_files])
 
+    def save_experience_buffer(self, filename: str | pathlib.Path) -> None:
+        saveable_experience_buffer = [
+            exp.make_serializeable()
+            for exp in self.experience_buffer.buffer
+        ]
+        with open(filename, "wb") as f:
+            pickle.dump(saveable_experience_buffer, f)
+
     def save_checkpoint(
         self, model: ChessCNN, optimizer: optim.Optimizer, episode: int
     ) -> None:
         logger.info(f"Saving checkpoint for episode {episode}")
+        
+        checkpoint_dir = base_path / app_config.APP_OUTPUT_DIR
+        
+        # Save current checkpoint
         torch.save(
             model.state_dict(),
-            base_path
-            / app_config.APP_OUTPUT_DIR
-            / f"model_{self.model_timestamp}_e{episode}.pt",
+            checkpoint_dir / f"model_{self.model_timestamp}_e{episode}.pt",
         )
-        # Save optimizer state
         torch.save(
             optimizer.state_dict(),
-            base_path
-            / app_config.APP_OUTPUT_DIR
-            / f"optimizer_{self.model_timestamp}_e{episode}.pt",
+            checkpoint_dir / f"optimizer_{self.model_timestamp}_e{episode}.pt",
         )
-        # Save experience buffer
-        with open(
-            base_path
-            / app_config.APP_OUTPUT_DIR
-            / f"experience_buffer_{self.model_timestamp}_e{episode}.pkl",
-            "wb",
-        ) as f:
-            pickle.dump(self.experience_buffer, f)
+        self.save_experience_buffer(
+            checkpoint_dir / f"experience_buffer_{self.model_timestamp}_e{episode}.pkl"
+        )
+
+        # Get all checkpoint files for this model
+        model_files = list(checkpoint_dir.glob(f"model_{self.model_timestamp}_e*.pt"))
+        optimizer_files = list(checkpoint_dir.glob(f"optimizer_{self.model_timestamp}_e*.pt"))
+        buffer_files = list(checkpoint_dir.glob(f"experience_buffer_{self.model_timestamp}_e*.pkl"))
+        
+        # Sort files by episode number
+        def get_episode(filename):
+            return int(filename.stem.split('_e')[-1])
+        
+        model_files.sort(key=get_episode, reverse=True)
+        optimizer_files.sort(key=get_episode, reverse=True)
+        buffer_files.sort(key=get_episode, reverse=True)
+        
+        # Keep only the last 5 checkpoints
+        for file_list in [model_files, optimizer_files, buffer_files]:
+            for file in file_list[5:]:
+                os.remove(file)
+                logger.info(f"Deleted old checkpoint file: {file}")
 
     def select_device(self) -> torch.device:
         if torch.cuda.is_available():
@@ -223,7 +284,7 @@ class CNNTrainer:
                 logger.debug("START Predicting Q values")
                 # Predict Q-values
                 with torch.no_grad():
-                    predicted_q_values: torch.Tensor = model(current_states)
+                    predicted_q_values, _ = model(current_states)
                 logger.debug("END Predicting Q values")
 
                 logger.debug("START Masking illegal moves")
@@ -271,7 +332,7 @@ class CNNTrainer:
                 logger.debug("START Predicting Opponent Q values")
                 # Select opponent next move
                 with torch.no_grad():
-                    opp_next_q_values = model(opp_next_states)
+                    opp_next_q_values, _ = model(opp_next_states)
                 logger.debug("END Predicting Opponent Q values")
 
                 logger.debug("START Masking illegal moves for Opponent")
@@ -328,7 +389,7 @@ class CNNTrainer:
 
                 logger.debug("START Predicting next Q values")
                 with torch.no_grad():
-                    next_q_values = model(next_states)
+                    next_q_values, _ = model(next_states)
                 logger.debug("END Predicting next Q values")
 
                 logger.debug("START Masking illegal moves for next state")
@@ -341,6 +402,7 @@ class CNNTrainer:
                     next_legal_moves_mask == 0, -1e10
                 )
                 max_next_q_values = masked_next_q_values.max(1)[0]
+                max_next_q_values[max_next_q_values == -1e10] = 0.0  # Set Q-value to 0.0 for situations where no legal moves are available
                 logger.debug("END Masking illegal moves for next state")
 
                 logger.debug("START Calculating target Q value")
@@ -363,8 +425,8 @@ class CNNTrainer:
 
                 logger.debug("START Creating ExperienceRecord")
                 # Create separate ExperienceRecord for each board
-                for current_state, legal_mask, action, reward, next_state, next_legal_mask, done, predicted_q, target_q_value in zip(
-                    current_states, legal_moves_mask, actions, rewards, next_states, next_legal_moves_mask, dones, predicted_q, target_q_value
+                for current_state, legal_mask, action, reward, next_state, next_legal_mask, done, predicted_q, target_q_value, pred_q, max_next_q in zip(
+                    current_states, legal_moves_mask, actions, rewards, next_states, next_legal_moves_mask, dones, predicted_q, target_q_value, predicted_q_values, max_next_q_values
                 ):
                     experience_buffer.append(
                         ExperienceRecord(
@@ -376,6 +438,8 @@ class CNNTrainer:
                             next_state=next_state,
                             next_legal_moves_mask=next_legal_mask,
                             done=bool(done),
+                            pred_q_values=pred_q,
+                            max_next_q=max_next_q.item()
                         )
                     )
                 logger.debug("END Creating ExperienceRecord")
@@ -388,17 +452,23 @@ class CNNTrainer:
         self,
         model: ChessCNN,
         optimizer: optim.Optimizer,
-        loss_fn: torch.nn.Module,
+        q_loss_fn: torch.nn.Module,
+        aux_loss_fn: torch.nn.Module,
         gamma: float,
         steps: int,
         batch_size: int,
         step_offset: int = 0,
-    ) -> float:
-        total_loss = 0.0
+    ) -> tuple[float, float]:
+        total_q_loss = 0.0
+        total_aux_loss = 0.0
         for step in tqdm(range(steps), total=steps, desc="Learning"):
             batch = self.experience_buffer.sample_n(batch_size)
             state_batch = torch.stack(
                 [exp.state for exp in batch],
+                dim=0
+            )
+            legal_moves_mask_batch = torch.stack(
+                [exp.legal_moves_mask for exp in batch],
                 dim=0
             )
             action_batch = torch.stack(
@@ -412,16 +482,20 @@ class CNNTrainer:
                 [exp.next_state for exp in batch],
                 dim=0
             )
+            next_legal_moves_mask_batch = torch.stack(
+                [exp.next_legal_moves_mask for exp in batch],
+                dim=0
+            )
             done_batch = torch.tensor(
                 [int(exp.done) for exp in batch], device=self.device
             )
 
-            predicted_q_values = model(state_batch)
+            predicted_q_values, aux_logits = model(state_batch)
             predicted_q = predicted_q_values.gather(1, action_batch)
 
-            next_q_values = model(next_state_batch)
+            next_q_values, _ = model(next_state_batch)
             masked_next_q_values = next_q_values.masked_fill(
-                torch.stack([exp.next_legal_moves_mask for exp in batch], dim=0).to(self.device) == 0, -1e10
+                next_legal_moves_mask_batch == 0, -1e10
             )
             max_next_q_values = masked_next_q_values.max(1)[0].detach()
 
@@ -430,8 +504,14 @@ class CNNTrainer:
             )
 
             # Compute loss
-            loss = loss_fn(predicted_q, target_q_values.unsqueeze(1))
-            total_loss += loss.item()
+            q_loss = q_loss_fn(predicted_q, target_q_values.unsqueeze(1))
+            total_q_loss += q_loss.item()
+            aux_loss = aux_loss_fn(
+                aux_logits,
+                legal_moves_mask_batch
+            )
+            total_aux_loss += aux_loss.item()
+            loss = q_loss + aux_loss
 
             # Backpropagation
             loss.backward()
@@ -443,7 +523,45 @@ class CNNTrainer:
 
             # Log metrics to Tensorboard
             self.writer.add_scalar("Loss/Step", loss.item(), step + step_offset)
-        return total_loss
+            self.writer.add_scalar("QLoss/Step", q_loss.item(), step + step_offset)
+            self.writer.add_scalar("AuxLoss/Step", aux_loss.item(), step + step_offset)
+        return total_q_loss, total_aux_loss
+
+    def eval_model(self, model: ChessCNN, steps: int, batch_size: int, step: int) -> float:
+        """
+        Evaluate the model. Currently only evaluates based on auxiliary task accuracy (move legality).
+        """
+        correct = 0
+        total = 0
+        aux_val_loss = 0.0
+        predictions = []
+        targets = []
+        for _ in tqdm(range(steps), total=steps, desc="Evaluating"):
+            batch = self.experience_buffer.sample_n(batch_size)
+            state_batch = torch.stack(
+                [exp.state for exp in batch],
+                dim=0
+            )
+            legal_moves_mask_batch = torch.stack(
+                [exp.legal_moves_mask for exp in batch],
+                dim=0
+            )
+            with torch.no_grad():
+                _, aux_logits = model(state_batch)
+            predicted_labels = torch.round(torch.sigmoid(aux_logits))
+            correct += (predicted_labels == legal_moves_mask_batch).sum().item()
+            total += legal_moves_mask_batch.numel()
+            aux_val_loss += F.binary_cross_entropy_with_logits(aux_logits, legal_moves_mask_batch).item()
+            predictions.extend(predicted_labels.cpu().numpy().flatten())
+            targets.extend(legal_moves_mask_batch.cpu().numpy().flatten())
+        accuracy = correct / total
+        precision = precision_score(targets, predictions)
+        recall = recall_score(targets, predictions)
+        self.writer.add_scalar("Validation/AuxAccuracy/Step", accuracy, step)
+        self.writer.add_scalar("Validation/AuxPrecision/Step", precision, step)
+        self.writer.add_scalar("Validation/AuxRecall/Step", recall, step)
+        self.writer.add_scalar("Validation/AuxLoss/Step", aux_val_loss, step)
+        return aux_val_loss
 
     def train_deep_q_network_off_policy(
         self,
@@ -460,7 +578,8 @@ class CNNTrainer:
             eta_min=1e-6
         )
 
-        loss_fn = F.mse_loss
+        q_loss_fn = F.mse_loss
+        aux_loss_fn = F.binary_cross_entropy_with_logits  # Classifying move legality
         epsilon = 1.0
 
         # Save hparams to Tensorboard
@@ -487,6 +606,7 @@ class CNNTrainer:
         episode = 0  # episode = 1 game played
         step = 0  # step = 1 batch of moves learned
         last_saved_episode = 0
+        last_eval_episode = 0
 
         while episode < episodes:
             gamma = min(
@@ -500,10 +620,11 @@ class CNNTrainer:
             self.experience_buffer.extend(new_experiences)
             episode += app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
 
-            total_loss = self.learn(
+            total_q_loss, total_aux_loss = self.learn(
                 model=model,
                 optimizer=optimizer,
-                loss_fn=loss_fn,
+                q_loss_fn=q_loss_fn,
+                aux_loss_fn=aux_loss_fn,
                 gamma=gamma,
                 steps=app_config.MODEL_LEARN_STEPS,
                 batch_size=app_config.MODEL_BATCH_SIZE,
@@ -512,16 +633,22 @@ class CNNTrainer:
             step += app_config.MODEL_LEARN_STEPS
 
             # Log metrics to Tensorboard
-            self.writer.add_scalar("TotalLoss/Step", total_loss, step)
+            self.writer.add_scalar("TotalQLoss/Step", total_q_loss, step)
+            self.writer.add_scalar("TotalAuxLoss/Step", total_aux_loss, step)
             self.writer.add_scalar("Epsilon/Step", epsilon, step)
             self.writer.add_scalar("Gamma/Step", gamma, step)
             self.writer.add_scalar("LR/Step", scheduler.get_last_lr()[0], step)
 
-            logger.info(f"Episode {episode}, Loss: {total_loss}")
+            logger.info(f"Episode {episode}, QLoss: {total_q_loss}, AuxLoss: {total_aux_loss}")
 
             if episode - last_saved_episode > app_config.APP_SAVE_STEPS:
                 self.save_checkpoint(model, optimizer, episode)
                 last_saved_episode = episode
+
+            if episode - last_eval_episode > app_config.APP_EVAL_STEPS:
+                aux_val_loss = self.eval_model(model, 10, app_config.MODEL_BATCH_SIZE, step)
+                logger.info(f"Episode {episode}, Validation Aux Loss: {aux_val_loss}")
+                last_eval_episode = episode
 
             # Epsilon decay
             epsilon = max(
@@ -543,5 +670,5 @@ if __name__ == "__main__":
     model = ChessCNN(num_filters=256, num_residual_blocks=12)
     trainer = CNNTrainer(app_config=app_config)
     trainer.train_deep_q_network_off_policy(
-        model, episodes=200000, app_config=app_config
+        model, episodes=100000, app_config=app_config
     )

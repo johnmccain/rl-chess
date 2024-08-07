@@ -80,21 +80,21 @@ class ChessAgent:
 
         with torch.no_grad():  # Disable gradient computation for inference
             # Get the model's predictions for the current state
-            logits: torch.Tensor = self.model(current_state)
-            logits = logits.view(-1)  # Flatten the logits
+            q_values, logits = self.model(current_state)
+            q_values = q_values.view(-1)  # Flatten the q values
 
         # Generate a mask for the legal moves
         legal_moves_mask = get_legal_moves_mask(board).to(self.device)
-        masked_logits = logits.masked_fill(legal_moves_mask == 0, -1e10)
+        masked_q_values = q_values.masked_fill(legal_moves_mask == 0, -1e10)
 
         # Find the index of the highest scoring legal move
-        best_move_index = torch.argmax(masked_logits).item()
+        best_move_index = torch.argmax(masked_q_values).item()
 
         # Convert this index back to a chess move
         best_move = index_to_move(best_move_index, board)
         logger.info(f"Best move: {best_move}")
 
-        best_move_score = masked_logits[best_move_index].item()
+        best_move_score = masked_q_values[best_move_index].item()
         logger.info(f"Best move score: {best_move_score}")
 
         return best_move
@@ -112,15 +112,15 @@ class ChessAgent:
 
         with torch.no_grad():  # Disable gradient computation for inference
             # Get the model's predictions for the current state
-            logits: torch.Tensor = self.model(current_state)
-            logits = logits.view(-1)  # Flatten the logits
+            q_values, logits = self.model(current_state)
+            q_values = q_values.view(-1)  # Flatten the q_values
 
         # Generate a mask for the legal moves
         legal_moves_mask = get_legal_moves_mask(board)
-        masked_logits = logits.masked_fill(legal_moves_mask == 0, -1e10)
+        masked_q_values = q_values.masked_fill(legal_moves_mask == 0, -1e10)
 
         move_scores = {}
-        for index, score in enumerate(masked_logits):
+        for index, score in enumerate(masked_q_values):
             if index // 64 != square:
                 continue
             if score < -1e6:

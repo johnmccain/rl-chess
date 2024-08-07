@@ -81,6 +81,38 @@ def calculate_reward(
 
     return reward
 
+def tensor_to_board(tensor: torch.IntTensor, player: chess.Color) -> chess.Board:
+    board = chess.Board(None)  # Create an empty board
+    
+    # Mapping from piece IDs to chess.Piece objects
+    piece_map = {
+        1: chess.Piece(chess.PAWN, player),
+        2: chess.Piece(chess.KNIGHT, player),
+        3: chess.Piece(chess.BISHOP, player),
+        4: chess.Piece(chess.ROOK, player),
+        5: chess.Piece(chess.QUEEN, player),
+        6: chess.Piece(chess.KING, player),
+        7: chess.Piece(chess.PAWN, not player),
+        8: chess.Piece(chess.KNIGHT, not player),
+        9: chess.Piece(chess.BISHOP, not player),
+        10: chess.Piece(chess.ROOK, not player),
+        11: chess.Piece(chess.QUEEN, not player),
+        12: chess.Piece(chess.KING, not player)
+    }
+
+    # Iterate through the tensor and place pieces on the board
+    for square, piece_id in enumerate(tensor):
+        if piece_id != 0:  # 0 represents an empty square
+            board.set_piece_at(square, piece_map[piece_id.item()])
+
+    # Set the turn
+    board.turn = player
+
+    # Castling rights and en passant square are not stored in the tensor
+    board.clean_castling_rights()
+    board.ep_square = None
+
+    return board
 
 def get_piece_id(piece_type: chess.PieceType, is_player_piece: bool) -> int:
     base_id = piece_type  # base IDs for player pieces (1-6)
