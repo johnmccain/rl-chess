@@ -1,7 +1,9 @@
 import datetime
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import collections
+import pickle
 
 import chess
 import pandas as pd
@@ -9,6 +11,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
@@ -49,13 +52,47 @@ def write_log(
         )
 
 
-@dataclass
+@dataclass(order=True)
 class ExperienceRecord:
-    state: torch.Tensor
-    action: torch.Tensor
-    reward: float
-    next_state: torch.Tensor
-    done: bool
+    q_diff: float
+    state: torch.Tensor= field(compare=False)
+    action: torch.Tensor= field(compare=False)
+    reward: float= field(compare=False)
+    next_state: torch.Tensor = field(compare=False)
+    done: bool= field(compare=False)
+
+
+class ExperienceBuffer:
+
+    def __init__(self, window_size: int) -> None:
+        self.buffer: collections.deque[ExperienceRecord] = collections.deque(maxlen=window_size)
+        self.window_size = window_size
+
+    def add(self, experience: ExperienceRecord) -> None:
+        self.buffer.append(experience)
+
+    def sample(self) -> ExperienceRecord:
+        """
+        Sample a random experience from the buffer and return it.
+        """
+        if not self.buffer:
+            raise IndexError("sample from an empty buffer")
+        return random.choice(self.buffer)
+
+    def sample_n(self, n: int) -> list[ExperienceRecord]:
+        """
+        Sample n random experiences from the buffer without replacement and return them.
+        """
+        if len(self.buffer) < n:
+            raise IndexError("sample from an empty buffer")
+        return random.sample(self.buffer, n)
+
+    def extend(self, iterable: list[ExperienceRecord]) -> None:
+        self.buffer.extend(iterable)
+
+    def __len__(self) -> int:
+        return len(self.buffer)
+
 
 class CNNTrainer:
 
@@ -85,6 +122,44 @@ class CNNTrainer:
             / f"qchess_{self.model_timestamp}",
         )
 
+        self.experience_buffer = ExperienceBuffer(app_config.MODEL_BUFFER_SIZE)
+
+
+    @staticmethod
+    def find_latest_model_episode(model_timestamp: str) -> int | None:
+        """
+        Find the latest episode number for a given model timestamp.
+        """
+        model_files = list(
+            base_path.glob(f"{app_config.APP_OUTPUT_DIR}/model_{model_timestamp}_e*.pt")
+        )
+        if not model_files:
+            return None
+        return max([int(f.stem.split("_e")[-1]) for f in model_files])
+
+    def save_checkpoint(self, model: ChessCNN, optimizer: optim.Optimizer, episode: int) -> None:
+        torch.save(
+            model.state_dict(),
+            base_path
+            / app_config.APP_OUTPUT_DIR
+            / f"model_{self.model_timestamp}_e{episode}.pt",
+        )
+        # Save optimizer state
+        torch.save(
+            optimizer.state_dict(),
+            base_path
+            / app_config.APP_OUTPUT_DIR
+            / f"optimizer_{self.model_timestamp}_e{episode}.pt",
+        )
+        # Save experience buffer
+        with open(
+            base_path
+            / app_config.APP_OUTPUT_DIR
+            / f"experience_buffer_{self.model_timestamp}_e{episode}.pkl",
+            "wb",
+        ) as f:
+            pickle.dump(self.experience_buffer, f)
+
     def select_device(self) -> torch.device:
         if torch.cuda.is_available():
             logger.info("CUDA available, using GPU")
@@ -105,13 +180,171 @@ class CNNTrainer:
         board = chess.Board(opening["fen"].values[0])
         return board
 
-    def train_deep_q_network(
+    def select_action(self, masked_q_values: torch.Tensor, epsilon: float, board: chess.Board) -> torch.Tensor:
+        """
+        Select an action based on epsilon-greedy policy or stockfish evaluation.
+
+        :param masked_q_values: Q-values for the current state with illegal moves masked
+        :param epsilon: Exploration rate
+        :param board: Current board state
+        """
+        # Epsilon-greedy action selection
+        if random.random() > epsilon:
+            action = masked_q_values.max(1)[1].view(1, 1)
+        elif random.random() < app_config.STOCKFISH_PROB:
+            action = torch.tensor(
+                [self.stockfish_evaluator.take_action(board)], device=self.device
+            ).unsqueeze(0)
+        else:
+            # Select action randomly with softmax
+            action = torch.multinomial(F.softmax(masked_q_values, dim=-1), 1)
+        return action
+
+    def explore(self, model: ChessCNN, episodes: int, gamma: float, epsilon: float) -> list[ExperienceRecord]:
+        experience_buffer = []
+        for episode in tqdm(range(episodes), total=episodes, desc="Exploring"):
+            # 25% of the time, start with a random opening state
+            if random.random() < 0.25:
+                board = self.sample_opening_state()
+            else:
+                board = chess.Board()
+            moves = 0
+
+            while not board.is_game_over() and moves < app_config.MODEL_MAX_MOVES:
+                current_state = board_to_tensor(board, board.turn).to(self.device)
+                current_state = current_state.unsqueeze(0)  # Batch size of 1
+
+                # Predict Q-values
+                with torch.no_grad():
+                    predicted_q_values: torch.Tensor = model(current_state)
+
+                # Mask illegal moves
+                legal_moves_mask = get_legal_moves_mask(board).to(self.device)
+                masked_q_values = predicted_q_values.masked_fill(
+                    legal_moves_mask == 0, -1e10
+                )
+
+                action = self.select_action(masked_q_values, epsilon, board)
+
+                # Take action and observe reward and next state
+                move = index_to_move(action, board)
+                if move is None:
+                    logger.warning("Invalid move selected!")
+                    break
+                reward = calculate_reward(board, move)
+                # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
+                opp_reward = calculate_reward(board, move, flip_perspective=True)
+
+                # Take the action
+                board.push(move)
+                opp_next_state = board_to_tensor(board, board.turn).to(self.device)
+                opp_next_state = opp_next_state.unsqueeze(0)
+
+                done = torch.tensor([int(board.is_game_over())], device=self.device)
+
+                if not done:
+                    # Select opponent next move
+                    with torch.no_grad():
+                        opp_next_q_values = model(opp_next_state)
+                    opp_next_legal_moves_mask = get_legal_moves_mask(board).to(self.device)
+                    opp_masked_next_q_values = opp_next_q_values.masked_fill(
+                        opp_next_legal_moves_mask == 0, -1e10
+                    )
+                    opp_action = self.select_action(opp_masked_next_q_values, epsilon, board)
+
+                    # Take opponent action
+                    opp_move = index_to_move(opp_action, board)
+                    if opp_move is None:
+                        logger.warning("Invalid opponent move selected!")
+                        break
+                    # Calculate reward for opponent move
+                    opp_reward = calculate_reward(board, opp_move)
+                    board.push(opp_move)
+
+                    # Compute the next-state max Q-value for active player given the opponent's possible move
+                    next_state = board_to_tensor(board, board.turn).to(self.device)
+                    next_state = next_state.unsqueeze(0)
+                    with torch.no_grad():
+                        next_q_values = model(next_state)
+                    next_legal_moves_mask = get_legal_moves_mask(board).to(self.device)
+                    masked_next_q_values = next_q_values.masked_fill(
+                        next_legal_moves_mask == 0, -1e10
+                    )
+                    max_next_q_values = masked_next_q_values.max(1)[0].detach()
+                    # Roll back the board state to before the opponent move
+                    board.pop()
+                else:
+                    # NOTE: is 0.0 the correct default value for max_next_q_values?
+                    max_next_q_values = torch.tensor([0.0], device=self.device)
+                    next_state = current_state  # This is a terminal state; ends up being ignored but we need some value of the correct shape
+                # Compute the target Q-value
+                target_q_value = (
+                    reward - opp_reward + (gamma * max_next_q_values * (1 - done))
+                )
+                predicted_q = predicted_q_values.gather(1, action)
+
+                experience_buffer.append(
+                    ExperienceRecord(
+                        q_diff=(predicted_q - target_q_value).item(),
+                        state=current_state,
+                        action=action,
+                        reward=reward,
+                        next_state=next_state,
+                        done=bool(done),
+                    )
+                )
+                moves += 1
+        return experience_buffer
+
+    def learn(
+        self,
+        model: ChessCNN,
+        optimizer: optim.Optimizer,
+        loss_fn: torch.nn.Module,
+        gamma: float,
+        steps: int,
+        batch_size: int,
+        step_offset: int = 0,
+    ) -> float:
+        total_loss = 0.0
+        for step in tqdm(range(steps), total=steps, desc="Learning"):
+            batch = self.experience_buffer.sample_n(batch_size)
+            state_batch = torch.cat([exp.state for exp in batch])
+            action_batch = torch.cat([exp.action for exp in batch])
+            reward_batch = torch.tensor([exp.reward for exp in batch], device=self.device)
+            next_state_batch = torch.cat([exp.next_state for exp in batch if exp.next_state is not None])
+            done_batch = torch.tensor([int(exp.done) for exp in batch], device=self.device)
+
+            predicted_q_values = model(state_batch)
+            predicted_q = predicted_q_values.gather(1, action_batch)
+
+            max_next_q_values = model(next_state_batch).max(1)[0].detach()
+
+            target_q_values = reward_batch + (gamma * max_next_q_values * (1 - done_batch))
+
+            # Compute loss
+            loss = loss_fn(predicted_q, target_q_values.unsqueeze(1))
+            total_loss += loss.item()
+
+            # Backpropagation
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), app_config.MODEL_CLIP_GRAD
+            )
+            optimizer.step()
+            optimizer.zero_grad()
+
+            # Log metrics to Tensorboard
+            self.writer.add_scalar("Loss/Step", loss.item(), step + step_offset)
+        return total_loss
+
+
+    def train_deep_q_network_off_policy(
         self,
         model: ChessCNN,
         episodes: int,
         app_config: AppConfig = AppConfig(),
-    ):
-        
+    ) -> ChessCNN:
         model.to(self.device)
 
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
@@ -143,176 +376,38 @@ class CNNTrainer:
             app_config.MODEL_GAMMA - app_config.MODEL_INITIAL_GAMMA
         ) / app_config.MODEL_GAMMA_RAMP_STEPS
 
-        for episode in range(episodes):
+        episode = 0
+        step = 0
+
+        while episode < episodes:
             gamma = min(
                 app_config.MODEL_INITIAL_GAMMA + gamma_ramp * episode,
                 app_config.MODEL_GAMMA,
             )
-            # 25% of the time, start with a random opening state
-            if random.random() < 0.25:
-                board = self.sample_opening_state()
-            else:
-                board = chess.Board()
-            total_loss = 0.0
-            moves = 0
 
-            if episode % 100 == 0:
-                write_log(
-                    model_timestamp=self.model_timestamp,
-                    board=board,
-                    move=None,
-                    score=None,
-                    episode=episode,
-                    total_loss=None,
-                    loss=None,
-                )
+            new_experiences = self.explore(model, app_config.MODEL_EXPLORE_EPISODES, gamma, epsilon)
+            self.experience_buffer.extend(new_experiences)
+            episodes += app_config.MODEL_EXPLORE_EPISODES
 
-            while not board.is_game_over() and moves < app_config.MODEL_MAX_MOVES:
-                current_state = board_to_tensor(board, board.turn).to(self.device)
-                current_state = current_state.unsqueeze(0)  # Batch size of 1
-
-                # Predict Q-values
-                predicted_q_values: torch.Tensor = model(current_state)
-
-                # Mask illegal moves
-                legal_moves_mask = get_legal_moves_mask(board).to(self.device)
-                masked_q_values = predicted_q_values.masked_fill(
-                    legal_moves_mask == 0, -1e10
-                )
-
-                # Epsilon-greedy action selection
-                if random.random() > epsilon:
-                    action = masked_q_values.max(1)[1].view(1, 1)
-                elif random.random() < app_config.STOCKFISH_PROB:
-                    action = torch.tensor(
-                        [self.stockfish_evaluator.take_action(board)], device=self.device
-                    ).unsqueeze(0)
-                else:
-                    # Select action randomly with softmax
-                    action = torch.multinomial(F.softmax(masked_q_values, dim=-1), 1)
-
-                # Take action and observe reward and next state
-                move = index_to_move(action, board)
-                if move is None:
-                    logger.warning("Invalid move selected!")
-                    break
-                reward = calculate_reward(board, move)
-                # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
-                opp_reward = calculate_reward(board, move, flip_perspective=True)
-
-                # Take the action
-                board.push(move)
-                opp_next_state = board_to_tensor(board, board.turn).to(self.device)
-                opp_next_state = opp_next_state.unsqueeze(0)
-
-                done = torch.tensor([int(board.is_game_over())], device=self.device)
-
-                if not done:
-                    # Select opponent next move
-                    with torch.no_grad():
-                        opp_next_q_values = model(opp_next_state)
-                    opp_next_legal_moves_mask = get_legal_moves_mask(board).to(self.device)
-                    opp_masked_next_q_values = opp_next_q_values.masked_fill(
-                        opp_next_legal_moves_mask == 0, -1e10
-                    )
-                    if random.random() > epsilon:
-                        opp_action = opp_masked_next_q_values.max(1)[1].view(1, 1)
-                    elif random.random() < app_config.STOCKFISH_PROB:
-                        opp_action = torch.tensor(
-                            [self.stockfish_evaluator.take_action(board)], device=self.device
-                        ).unsqueeze(0)
-                    else:
-                        opp_action = torch.multinomial(
-                            F.softmax(opp_masked_next_q_values, dim=-1), 1
-                        )
-                    # Take opponent action
-                    opp_move = index_to_move(opp_action, board)
-                    if opp_move is None:
-                        logger.warning("Invalid opponent move selected!")
-                        break
-                    # Calculate reward for opponent move
-                    opp_reward = calculate_reward(board, opp_move)
-                    board.push(opp_move)
-
-                    # Compute the next-state max Q-value for active player
-                    next_state = board_to_tensor(board, board.turn).to(self.device)
-                    next_state = next_state.unsqueeze(0)
-                    next_q_values = model(next_state)
-                    # Roll back the board state
-                    board.pop()
-                    next_legal_moves_mask = get_legal_moves_mask(board).to(self.device)
-                    masked_next_q_values = next_q_values.masked_fill(
-                        next_legal_moves_mask == 0, -1e10
-                    )
-                    max_next_q_values = masked_next_q_values.max(1)[0].detach()
-                else:
-                    max_next_q_values = torch.tensor([0.0], device=self.device)
-                # Compute the target Q-value
-                target_q_values = (
-                    reward - opp_reward + (gamma * max_next_q_values * (1 - done))
-                )
-                predicted_q = predicted_q_values.gather(1, action)
-
-                # Compute loss
-                loss = (
-                    loss_fn(predicted_q, target_q_values.unsqueeze(1))
-                    / app_config.MODEL_GRAD_STEPS
-                )
-                total_loss += loss.item()
-
-                # Backpropagation
-                loss.backward()
-                # Apply gradient clipping
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), app_config.MODEL_CLIP_GRAD
-                )
-                moves += 1
-
-                if episode % 100 == 0:
-                    write_log(
-                        model_timestamp=self.model_timestamp,
-                        board=board,
-                        move=move,
-                        score=predicted_q.item(),
-                        episode=episode,
-                        total_loss=total_loss,
-                        loss=loss.item(),
-                    )
-                if moves % app_config.MODEL_GRAD_STEPS == 0 or done:
-                    # Gradient accumulation
-                    optimizer.step()
-                    optimizer.zero_grad()
+            total_loss = self.learn(
+                model, optimizer, loss_fn, gamma, app_config.MODEL_LEARN_STEPS, app_config.MODEL_GRAD_STEPS
+            )
 
             # Log metrics to Tensorboard
-            self.writer.add_scalar("Loss/Episode", total_loss, episode)
-            self.writer.add_scalar("Loss/Move", total_loss / moves, episode)
-            self.writer.add_scalar("Epsilon/Episode", epsilon, episode)
-            self.writer.add_scalar("Moves/Episode", moves, episode)
-            self.writer.add_scalar("Gamma/Episode", gamma, episode)
-            self.writer.add_scalar("LR/Episode", scheduler.get_last_lr()[0], episode)
+            self.writer.add_scalar("Loss/Step", total_loss, step)
+            self.writer.add_scalar("Epsilon/Step", epsilon, step)
+            self.writer.add_scalar("Gamma/Step", gamma, step)
+            self.writer.add_scalar("LR/Step", scheduler.get_last_lr()[0], episode)
 
-            if episode % 10 == 0:
-                logger.info(
-                    f"Episode {episode}, Loss: {total_loss}, Moves: {moves}, Loss/move: {total_loss / moves}"
-                )
+            logger.info(
+                f"Episode {episode}, Loss: {total_loss}"
+            )
 
             if episode % app_config.APP_SAVE_STEPS == 0:
-                torch.save(
-                    model.state_dict(),
-                    base_path
-                    / app_config.APP_OUTPUT_DIR
-                    / f"model_{self.model_timestamp}_e{episode}.pt",
-                )
-                # Save optimizer state
-                torch.save(
-                    optimizer.state_dict(),
-                    base_path
-                    / app_config.APP_OUTPUT_DIR
-                    / f"optimizer_{self.model_timestamp}_e{episode}.pt",
-                )
+                self.save_checkpoint(model, optimizer, episode)
 
             # Epsilon decay
-            epsilon = max(epsilon * app_config.MODEL_DECAY, app_config.MODEL_MIN_EPSILON)
+            epsilon = max((1.0 * app_config.MODEL_DECAY)**episode, app_config.MODEL_MIN_EPSILON)
 
             # Learning rate scheduler
             scheduler.step()
@@ -324,10 +419,11 @@ class CNNTrainer:
         )
         torch.save(model.state_dict(), model_output_path)
         logger.info(f"Model saved to {model_output_path}")
+        return model
 
 
 if __name__ == "__main__":
     app_config = AppConfig()
     model = ChessCNN(num_filters=256, num_residual_blocks=12)
     trainer = CNNTrainer(app_config=app_config)
-    trainer.train_deep_q_network(model, episodes=50000, app_config=app_config)
+    trainer.train_deep_q_network_off_policy(model, episodes=50000, app_config=app_config)
