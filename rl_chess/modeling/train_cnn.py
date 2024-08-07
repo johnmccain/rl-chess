@@ -29,6 +29,7 @@ app_config = AppConfig()
 logging.basicConfig(
     level=app_config.LOG_LEVEL,
     format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("train_cnn.log")],
 )
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,7 @@ class CNNTrainer:
     def save_checkpoint(
         self, model: ChessCNN, optimizer: optim.Optimizer, episode: int
     ) -> None:
+        logger.info(f"Saving checkpoint for episode {episode}")
         torch.save(
             model.state_dict(),
             base_path
@@ -193,116 +195,189 @@ class CNNTrainer:
         """
         # Epsilon-greedy action selection
         if random.random() > epsilon:
-            action = masked_q_values.max(1)[1].view(1, 1)
-        elif random.random() < app_config.STOCKFISH_PROB:
-            action = torch.tensor(
-                [self.stockfish_evaluator.take_action(board)], device=self.device
-            ).unsqueeze(0)
+            action = masked_q_values.max(-1)[1].view(1)
         else:
             # Select action randomly with softmax
             action = torch.multinomial(F.softmax(masked_q_values, dim=-1), 1)
         return action
 
     def explore(
-        self, model: ChessCNN, episodes: int, gamma: float, epsilon: float
+        self, model: ChessCNN, episodes: int, gamma: float, epsilon: float, batch_size: int
     ) -> list[ExperienceRecord]:
         experience_buffer = []
         for episode in tqdm(range(episodes), total=episodes, desc="Exploring"):
-            # 25% of the time, start with a random opening state
-            if random.random() < 0.25:
-                board = self.sample_opening_state()
-            else:
-                board = chess.Board()
-            moves = 0
 
-            while not board.is_game_over() and moves < app_config.MODEL_MAX_MOVES:
-                current_state = board_to_tensor(board, board.turn).to(self.device)
-                current_state = current_state.unsqueeze(0)  # Batch size of 1
+            boards = [
+                chess.Board() if random.random() > 0.25 else self.sample_opening_state()
+                for _ in range(batch_size)
+            ]
+            n_moves = 0
 
+            while boards and not all(board.is_game_over() for board in boards) and n_moves < app_config.MODEL_MAX_MOVES:
+                current_states = torch.stack([board_to_tensor(board, board.turn) for board in boards], dim=0).to(self.device)
+
+                ### Calculate Player move ###
+
+                logger.debug("START Predicting Q values")
                 # Predict Q-values
                 with torch.no_grad():
-                    predicted_q_values: torch.Tensor = model(current_state)
+                    predicted_q_values: torch.Tensor = model(current_states)
+                logger.debug("END Predicting Q values")
 
+                logger.debug("START Masking illegal moves")
                 # Mask illegal moves
-                legal_moves_mask = get_legal_moves_mask(board).to(self.device)
+                legal_moves_mask = torch.stack([get_legal_moves_mask(board) for board in boards], dim=0).to(self.device)
                 masked_q_values = predicted_q_values.masked_fill(
                     legal_moves_mask == 0, -1e10
                 )
+                logger.debug("END Masking illegal moves")
 
-                action = self.select_action(masked_q_values, epsilon, board)
+                logger.debug("START Selecting action")
+                actions = torch.stack([
+                    self.select_action(masked_q_values[idx], epsilon, board)
+                    for idx, board in enumerate(boards)
+                ], dim=0)
+                logger.debug("END Selecting action")
 
+                logger.debug("START Taking action & calculating reward")
                 # Take action and observe reward and next state
-                move = index_to_move(action, board)
-                if move is None:
+                moves = [index_to_move(actions[idx].item(), board) for idx, board in enumerate(boards)]
+                if any(move is None for move in moves):
                     logger.warning("Invalid move selected!")
+                    # No handling for invalid moves; just break out of the loop
                     break
-                reward = calculate_reward(board, move)
+                rewards = torch.tensor([calculate_reward(board, move) for board, move in zip(boards, moves)]).to(self.device)
                 # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
-                opp_reward = calculate_reward(board, move, flip_perspective=True)
+                default_opp_rewards = [calculate_reward(board, move, flip_perspective=True) for board, move in zip(boards, moves)]
 
                 # Take the action
-                board.push(move)
-                opp_next_state = board_to_tensor(board, board.turn).to(self.device)
-                opp_next_state = opp_next_state.unsqueeze(0)
+                for move, board in zip(moves, boards):
+                    board.push(move)
+                logger.debug("END Taking action & calculating reward")
 
-                done = torch.tensor([int(board.is_game_over())], device=self.device)
+                ### Calculate Opponent Move ###
+                logger.debug("START Preparing Opponent move")
+                opp_next_states = torch.stack([
+                    board_to_tensor(board, board.turn)
+                    for board in boards
+                ], dim=0).to(self.device)
 
-                if not done:
-                    # Select opponent next move
-                    with torch.no_grad():
-                        opp_next_q_values = model(opp_next_state)
-                    opp_next_legal_moves_mask = get_legal_moves_mask(board).to(
-                        self.device
-                    )
-                    opp_masked_next_q_values = opp_next_q_values.masked_fill(
-                        opp_next_legal_moves_mask == 0, -1e10
-                    )
-                    opp_action = self.select_action(
-                        opp_masked_next_q_values, epsilon, board
-                    )
+                # To process as a batch, we continue processing games that are over with dummy values, but need to ensure that we don't push moves to the board
+                dones = torch.tensor([int(board.is_game_over()) for board in boards], device=self.device)
+                logger.debug("END Preparing Opponent move")
 
-                    # Take opponent action
-                    opp_move = index_to_move(opp_action, board)
-                    if opp_move is None:
-                        logger.warning("Invalid opponent move selected!")
-                        break
-                    # Calculate reward for opponent move
-                    opp_reward = calculate_reward(board, opp_move)
-                    board.push(opp_move)
+                logger.debug("START Predicting Opponent Q values")
+                # Select opponent next move
+                with torch.no_grad():
+                    opp_next_q_values = model(opp_next_states)
+                logger.debug("END Predicting Opponent Q values")
 
-                    # Compute the next-state max Q-value for active player given the opponent's possible move
-                    next_state = board_to_tensor(board, board.turn).to(self.device)
-                    next_state = next_state.unsqueeze(0)
-                    with torch.no_grad():
-                        next_q_values = model(next_state)
-                    next_legal_moves_mask = get_legal_moves_mask(board).to(self.device)
-                    masked_next_q_values = next_q_values.masked_fill(
-                        next_legal_moves_mask == 0, -1e10
-                    )
-                    max_next_q_values = masked_next_q_values.max(1)[0].detach()
-                    # Roll back the board state to before the opponent move
-                    board.pop()
-                else:
-                    # NOTE: is 0.0 the correct default value for max_next_q_values?
-                    max_next_q_values = torch.tensor([0.0], device=self.device)
-                    next_state = current_state  # This is a terminal state; ends up being ignored but we need some value of the correct shape
+                logger.debug("START Masking illegal moves for Opponent")
+                opp_next_legal_moves_mask = torch.stack([
+                    get_legal_moves_mask(board)
+                    for board in boards
+                ], dim=0).to(
+                    self.device
+                )
+                opp_masked_next_q_values = opp_next_q_values.masked_fill(
+                    opp_next_legal_moves_mask == 0, -1e10
+                )
+                logger.debug("END Masking illegal moves for Opponent")
+
+                logger.debug("START Selecting Opponent action")
+                opp_actions = [
+                    self.select_action(
+                        opp_masked_next_q_values[idx], epsilon, board
+                    ) if not done else -1  # -1 is a placeholder when there is no valid move
+                    for idx, (board, done) in enumerate(zip(boards, dones))
+                ]
+                logger.debug("END Selecting Opponent action")
+
+                logger.debug("START Taking Opponent action & calculating reward")
+                # Take opponent action
+                opp_moves = [
+                    index_to_move(opp_action, board)
+                    if opp_action != -1
+                    else None
+                    for opp_action, board in zip(opp_actions, boards)
+                ]
+
+                # Calculate reward for opponent move
+                opp_rewards = torch.tensor([
+                    calculate_reward(board, opp_move)
+                    if opp_move
+                    else default
+                    for opp_move, default, board in zip(opp_moves, default_opp_rewards, boards)
+                ]).to(self.device)
+                for board, opp_move in zip(boards, opp_moves):
+                    if opp_move:
+                        board.push(opp_move)
+                logger.debug("END Taking Opponent action & calculating reward")
+
+                ### Calculate next state and reward ###
+                # Compute the next-state max Q-value for active player given the opponent's possible move
+                # next_states for done boards are ignored, but we need to provide a tensor of the correct shape so we use the current state (since no move was pushed)
+                logger.debug("START Preparing next state")
+                next_states = torch.stack([
+                    board_to_tensor(board, board.turn)
+                    for board in boards
+                ], dim=0).to(self.device)
+                logger.debug("END Preparing next state")
+
+                logger.debug("START Predicting next Q values")
+                with torch.no_grad():
+                    next_q_values = model(next_states)
+                logger.debug("END Predicting next Q values")
+
+                logger.debug("START Masking illegal moves for next state")
+                next_legal_moves_mask = torch.stack([
+                    get_legal_moves_mask(board)
+                    for board in boards
+                ], dim=0).to(self.device)
+
+                masked_next_q_values = next_q_values.masked_fill(
+                    next_legal_moves_mask == 0, -1e10
+                )
+                max_next_q_values = masked_next_q_values.max(1)[0]
+                logger.debug("END Masking illegal moves for next state")
+
+                logger.debug("START Calculating target Q value")
+                # Roll back the board state to before the opponent move (if any opponent move was made)
+                for board, opp_move in zip(boards, opp_moves):
+                    if opp_move:
+                        board.pop()
+
+                # Handle boards where opponent had no valid moves (game was over)
+                # NOTE: is 0.0 the correct default value for max_next_q_values?
+                max_next_q_values.masked_fill(
+                    dones == 1, 0.0
+                )
                 # Compute the target Q-value
                 target_q_value = (
-                    reward - opp_reward + (gamma * max_next_q_values * (1 - done))
+                    rewards - opp_rewards + (gamma * max_next_q_values * (1 - dones))
                 )
-                predicted_q = predicted_q_values.gather(1, action)
+                predicted_q = predicted_q_values.gather(1, actions)
+                logger.debug("END Calculating target Q value")
 
-                experience_buffer.append(
-                    ExperienceRecord(
-                        q_diff=(predicted_q - target_q_value).item(),
-                        state=current_state,
-                        action=action,
-                        reward=reward,
-                        next_state=next_state,
-                        done=bool(done),
+                logger.debug("START Creating ExperienceRecord")
+                # Create separate ExperienceRecord for each board
+                for current_state, action, reward, next_state, done, predicted_q, target_q_value in zip(
+                    current_states, actions, rewards, next_states, dones, predicted_q, target_q_value
+                ):
+                    experience_buffer.append(
+                        ExperienceRecord(
+                            q_diff=(predicted_q - target_q_value).item(),
+                            state=current_state,
+                            action=action,
+                            reward=reward,
+                            next_state=next_state,
+                            done=bool(done),
+                        )
                     )
-                )
-                moves += 1
+                logger.debug("END Creating ExperienceRecord")
+                # Remove any games that are done
+                boards = [board for board in boards if not board.is_game_over()]
+                n_moves += 1
         return experience_buffer
 
     def learn(
@@ -318,13 +393,20 @@ class CNNTrainer:
         total_loss = 0.0
         for step in tqdm(range(steps), total=steps, desc="Learning"):
             batch = self.experience_buffer.sample_n(batch_size)
-            state_batch = torch.cat([exp.state for exp in batch])
-            action_batch = torch.cat([exp.action for exp in batch])
+            state_batch = torch.stack(
+                [exp.state for exp in batch],
+                dim=0
+            )
+            action_batch = torch.stack(
+                [exp.action for exp in batch],
+                dim=0
+            )
             reward_batch = torch.tensor(
                 [exp.reward for exp in batch], device=self.device
             )
-            next_state_batch = torch.cat(
-                [exp.next_state for exp in batch if exp.next_state is not None]
+            next_state_batch = torch.stack(
+                [exp.next_state for exp in batch],
+                dim=0
             )
             done_batch = torch.tensor(
                 [int(exp.done) for exp in batch], device=self.device
@@ -365,7 +447,9 @@ class CNNTrainer:
 
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=episodes, eta_min=1e-6
+            optimizer,
+            T_max=episodes//(app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE),
+            eta_min=1e-6
         )
 
         loss_fn = F.mse_loss
@@ -392,8 +476,9 @@ class CNNTrainer:
             app_config.MODEL_GAMMA - app_config.MODEL_INITIAL_GAMMA
         ) / app_config.MODEL_GAMMA_RAMP_STEPS
 
-        episode = 0
-        step = 0
+        episode = 0  # episode = 1 game played
+        step = 0  # step = 1 batch of moves learned
+        last_saved_episode = 0
 
         while episode < episodes:
             gamma = min(
@@ -402,48 +487,46 @@ class CNNTrainer:
             )
 
             new_experiences = self.explore(
-                model, app_config.MODEL_EXPLORE_EPISODES, gamma, epsilon
+                model, app_config.MODEL_EXPLORE_EPISODES, gamma, epsilon, app_config.MODEL_BATCH_SIZE
             )
             self.experience_buffer.extend(new_experiences)
-            episodes += app_config.MODEL_EXPLORE_EPISODES
+            episode += app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
 
             total_loss = self.learn(
-                model,
-                optimizer,
-                loss_fn,
-                gamma,
-                app_config.MODEL_LEARN_STEPS,
-                app_config.MODEL_GRAD_STEPS,
+                model=model,
+                optimizer=optimizer,
+                loss_fn=loss_fn,
+                gamma=gamma,
+                steps=app_config.MODEL_LEARN_STEPS,
+                batch_size=app_config.MODEL_BATCH_SIZE,
+                step_offset=step,
             )
+            step += app_config.MODEL_LEARN_STEPS
 
             # Log metrics to Tensorboard
-            self.writer.add_scalar("Loss/Step", total_loss, step)
+            self.writer.add_scalar("TotalLoss/Step", total_loss, step)
             self.writer.add_scalar("Epsilon/Step", epsilon, step)
             self.writer.add_scalar("Gamma/Step", gamma, step)
-            self.writer.add_scalar("LR/Step", scheduler.get_last_lr()[0], episode)
+            self.writer.add_scalar("LR/Step", scheduler.get_last_lr()[0], step)
 
             logger.info(f"Episode {episode}, Loss: {total_loss}")
 
-            if episode % app_config.APP_SAVE_STEPS == 0:
+            if episode - last_saved_episode > app_config.APP_SAVE_STEPS:
                 self.save_checkpoint(model, optimizer, episode)
+                last_saved_episode = episode
 
             # Epsilon decay
             epsilon = max(
-                (1.0 * app_config.MODEL_DECAY) ** episode, app_config.MODEL_MIN_EPSILON
+                (app_config.MODEL_DECAY) ** (episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)),
+                app_config.MODEL_MIN_EPSILON
             )
 
             # Learning rate scheduler
             scheduler.step()
 
         self.writer.close()
+        self.save_checkpoint(model, optimizer, episode)
         logger.info("Training complete")
-        model_output_path = (
-            base_path
-            / app_config.APP_OUTPUT_DIR
-            / f"model_cnn_{self.model_timestamp}_final.pt"
-        )
-        torch.save(model.state_dict(), model_output_path)
-        logger.info(f"Model saved to {model_output_path}")
         return model
 
 
@@ -452,5 +535,5 @@ if __name__ == "__main__":
     model = ChessCNN(num_filters=256, num_residual_blocks=12)
     trainer = CNNTrainer(app_config=app_config)
     trainer.train_deep_q_network_off_policy(
-        model, episodes=50000, app_config=app_config
+        model, episodes=200000, app_config=app_config
     )
