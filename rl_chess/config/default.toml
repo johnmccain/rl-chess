@@ -4,7 +4,7 @@ OUTPUT_DIR = "out"
 SAVE_STEPS = 1000
 
 # MODEL_NAME = "model_20240728-182541_final.pt"
-MODEL_NAME = "model_20240729-084354_e4000.pt"
+MODEL_NAME = "model_20240729-191909_e21000.pt"
 
 [LOG]
 LEVEL = "INFO"
@@ -12,15 +12,22 @@ LEVEL = "INFO"
 [MODEL]
 
 LR = 1e-4
-GAMMA = 0.95
+GAMMA = 0.9
 INITIAL_GAMMA = 0.0
-GAMMA_RAMP_STEPS = 1000
+GAMMA_RAMP_STEPS = 5000
 GRAD_STEPS = 8
 DECAY = 0.998
 MIN_EPSILON = 0.1
 CLIP_GRAD = 1.0
 MAX_MOVES = 100
+BUFFER_SIZE = 200000
+BATCH_SIZE = 64
+EXPLORE_EPISODES = 50
+LEARN_STEPS = 500
 
 [STOCKFISH]
 
-PATH = "/Users/johnmccain/Documents/repos/rl-chess/stockfish/stockfish-macos-m1-apple-silicon"
+# PATH = "/Users/johnmccain/Documents/repos/rl-chess/stockfish/stockfish-macos-m1-apple-silicon"
+PATH = "C:/Users/John/Documents/repos/rl-chess/stockfish/stockfish-windows-x86-64-avx2.exe"
+PROB = 0.15
+DEPTH = 10

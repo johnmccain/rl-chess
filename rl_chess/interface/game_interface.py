@@ -73,7 +73,6 @@ class GameInterface:
         return tuple(int(color1[i] * alpha + color2[i] * (1 - alpha)) for i in range(3))
 
     def get_victory_banner(self, outcome: chess.Outcome) -> pg.surface.Surface:
-        logger.info(f"Game over: {outcome}")
         banner = pg.Surface((512, 512))
         banner.set_alpha(192)
         if outcome.winner == chess.WHITE:
@@ -129,7 +128,7 @@ class GameInterface:
         # draw legend
         # check if we need to flip the board
         for idx, rank in enumerate(
-            chess.RANK_NAMES[:: 1 if perspective == chess.WHITE else -1]
+            chess.RANK_NAMES[:: -1 if perspective == chess.WHITE else 1]
         ):
             text = self.font.render(rank, False, (0, 0, 0))
             self.screen.blit(
@@ -297,8 +296,7 @@ class GameInterface:
                 if (row + col) % 2 == 0
                 else self.DARK_SQUARE_COLOR
             )
-            scaled_score = (score - min_score) / (max_score - min_score)
-            logger.info(f"Highlighting square {square} with score {scaled_score}")
+            scaled_score = (score - min_score) / (max_score - min_score + 1e-6)
             tint = self.mix_color((0, 0, 255), (255, 0, 0), scaled_score)
             pg.draw.rect(
                 self.screen,

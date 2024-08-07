@@ -37,5 +37,11 @@ class AppConfig(BaseModel):
     MODEL_MIN_EPSILON: float = config["model.min_epsilon"]
     MODEL_CLIP_GRAD: float = config["model.clip_grad"]
     MODEL_MAX_MOVES: int = config["model.max_moves"]
+    MODEL_BUFFER_SIZE: int = config["model.buffer_size"]
+    MODEL_BATCH_SIZE: int = config["model.batch_size"]
+    MODEL_EXPLORE_EPISODES: int = config["model.explore_episodes"]
+    MODEL_LEARN_STEPS: int = config["model.learn_steps"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]
+    STOCKFISH_PROB: float = config["stockfish.prob"]
+    STOCKFISH_DEPTH: int = config["stockfish.depth"]

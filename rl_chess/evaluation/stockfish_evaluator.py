@@ -21,20 +21,33 @@ class StockfishEvaluator:
     def set_elo_rating(self, elo: int):
         self.stockfish.set_elo_rating(elo)
 
+    def set_depth(self, depth: int):
+        self.stockfish.set_depth(depth)
+
     def move(self, board: chess.Board) -> chess.Move:
         self.stockfish.set_fen_position(board.fen())
         move_ucis = [m["Move"] for m in self.stockfish.get_top_moves(5)]
         if not move_ucis:
             return None  # Handle cases where no move is available (game over scenarios)
         while move_ucis:
-            try:
-                move = chess.Move.from_uci(move_ucis.pop(0))
-                board.push(move)
+            move_uci = move_ucis.pop(0)
+            move = chess.Move.from_uci(move_uci)
+            if move in board.legal_moves:
                 return move
-            except AssertionError:
-                # Invalid move, try the next one
-                continue
         return None
+
+    def take_action(self, board: chess.Board) -> int:
+        """
+        Select the best move according to the Stockfish engine. Return as an integer such that
+        1. Dividing by 64 gives the 'from' square
+        2. Modulo 64 gives the 'to' square
+        """
+        move = self.move(board)
+        if move is None:
+            raise ValueError("No legal moves available.")
+        from_index = move.from_square
+        to_index = move.to_square
+        return from_index * 64 + to_index
 
     def simulate_games(
         self, chess_agent: ChessAgent, games_per_elo=10, elo_range=range(400, 1200, 200)
@@ -54,6 +67,7 @@ class StockfishEvaluator:
                         board.push(move)
                     else:
                         move = self.move(board)  # Stockfish moves as black
+                        board.push(move)
                     if move is None:  # no move possible, game over
                         break
 

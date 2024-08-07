@@ -7,6 +7,9 @@ class ChessCNN(nn.Module):
     def __init__(self, num_filters=256, num_residual_blocks=10):
         super(ChessCNN, self).__init__()
 
+        self.num_filters = num_filters
+        self.num_residual_blocks = num_residual_blocks
+
         self.input_conv = nn.Conv2d(12, num_filters, kernel_size=3, padding=1)
         self.batch_norm = nn.BatchNorm2d(num_filters)
 
