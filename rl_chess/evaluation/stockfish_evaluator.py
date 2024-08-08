@@ -1,4 +1,5 @@
 import logging
+from typing import Iterable
 
 import chess
 import numpy as np
@@ -50,11 +51,25 @@ class StockfishEvaluator:
         return from_index * 64 + to_index
 
     def simulate_games(
-        self, chess_agent: ChessAgent, games_per_elo=10, elo_range=range(400, 1200, 200)
+        self, chess_agent: ChessAgent, games_per_elo=10, elo_range: Iterable[int] | None = None, depth_range: Iterable[int] | None = None
     ) -> tuple[int, int, int, int]:
         results = []
-        for elo in elo_range:
-            self.set_elo_rating(elo)
+        if elo_range is None and depth_range is None:
+            raise ValueError("elo_range or depth_range must be provided.")
+        if elo_range is not None and depth_range is not None:
+            raise ValueError("elo_range and depth_range cannot be provided simultaneously.")
+        elif elo_range is not None:
+            use_elo = True
+        else:
+            use_elo = False
+
+        difficulty_range = elo_range if use_elo else depth_range
+
+        for difficulty in difficulty_range:
+            if use_elo:
+                self.set_elo_rating(difficulty)
+            else:
+                self.set_depth(difficulty)
             wins, losses, draws = 0, 0, 0
 
             for _ in range(games_per_elo):
@@ -79,8 +94,8 @@ class StockfishEvaluator:
                 else:
                     draws += 1
 
-            results.append((elo, wins, losses, draws))
-            print(f"ELO {elo}: {wins} wins, {losses} losses, {draws} draws")
+            results.append((difficulty, wins, losses, draws))
+            print(f"Difficulty {difficulty}: {wins} wins, {losses} losses, {draws} draws")
 
         return results
 
