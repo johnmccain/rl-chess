@@ -17,6 +17,12 @@
             "module": "rl_chess.modeling.train"
         },
         {
+            "name": "rl_chess.modeling.train_cnn",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "rl_chess.modeling.train_cnn"
+        },
+        {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
