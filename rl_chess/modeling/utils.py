@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def calculate_material_score(board: chess.Board) -> float:
     """
-    Material score normalized by the total material on the board.
+    Material score normalized by the total material on the board (from the perspective of the current player).
     """
     piece_values = {
         chess.PAWN: 1,
@@ -73,7 +73,9 @@ def calculate_reward(
     elif board.is_stalemate() or board.is_insufficient_material():
         reward = 0
     else:
-        reward = calculate_material_score(board) + move_quality
+        # Material score is calculated based on the perspective of the moving player, and we just moved
+        material_score = -calculate_material_score(board)
+        reward = material_score + move_quality
     board.pop()
 
     if flip_perspective:
