@@ -42,6 +42,7 @@ class AppConfig(BaseModel):
     MODEL_BATCH_SIZE: int = config["model.batch_size"]
     MODEL_EXPLORE_EPISODES: int = config["model.explore_episodes"]
     MODEL_LEARN_STEPS: int = config["model.learn_steps"]
+    MODEL_TARGET_UPDATE_FREQ: int = config["model.target_update_freq"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]
     STOCKFISH_PROB: float = config["stockfish.prob"]

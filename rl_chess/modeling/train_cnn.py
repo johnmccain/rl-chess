@@ -66,6 +66,7 @@ class ExperienceRecord:
     next_state: torch.Tensor = field(compare=False)
     next_legal_moves_mask: torch.Tensor = field(compare=False)
     done: bool = field(compare=False)
+    opp_done: bool = field(compare=False)
     pred_q_values: torch.Tensor | None = field(default=None, compare=False)
     max_next_q: float | None = field(default=None, compare=False)
 
@@ -202,9 +203,6 @@ class CNNTrainer:
         torch.save(
             optimizer.state_dict(),
             checkpoint_dir / f"optimizer_{self.model_timestamp}_e{episode}.pt",
-        )
-        self.save_experience_buffer(
-            checkpoint_dir / f"experience_buffer_{self.model_timestamp}_e{episode}.pkl"
         )
 
         # Get all checkpoint files for this model
@@ -375,6 +373,8 @@ class CNNTrainer:
                 for board, opp_move in zip(boards, opp_moves):
                     if opp_move:
                         board.push(opp_move)
+                # Check if the game is over after the opponent move
+                opp_dones = torch.tensor([int(board.is_game_over()) for board in boards], device=self.device)
                 logger.debug("END Taking Opponent action & calculating reward")
 
                 ### Calculate next state and reward ###
@@ -425,8 +425,8 @@ class CNNTrainer:
 
                 logger.debug("START Creating ExperienceRecord")
                 # Create separate ExperienceRecord for each board
-                for current_state, legal_mask, action, reward, next_state, next_legal_mask, done, predicted_q, target_q_value, pred_q, max_next_q in zip(
-                    current_states, legal_moves_mask, actions, rewards, next_states, next_legal_moves_mask, dones, predicted_q, target_q_value, predicted_q_values, max_next_q_values
+                for current_state, legal_mask, action, reward, next_state, next_legal_mask, done, opp_done, predicted_q, target_q_value, pred_q, max_next_q in zip(
+                    current_states, legal_moves_mask, actions, rewards, next_states, next_legal_moves_mask, dones, opp_dones, predicted_q, target_q_value, predicted_q_values, max_next_q_values
                 ):
                     experience_buffer.append(
                         ExperienceRecord(
@@ -438,6 +438,7 @@ class CNNTrainer:
                             next_state=next_state,
                             next_legal_moves_mask=next_legal_mask,
                             done=bool(done),
+                            opp_done=bool(opp_done),
                             pred_q_values=pred_q,
                             max_next_q=max_next_q.item()
                         )
@@ -451,80 +452,62 @@ class CNNTrainer:
     def learn(
         self,
         model: ChessCNN,
+        target_model: ChessCNN,
         optimizer: optim.Optimizer,
         q_loss_fn: torch.nn.Module,
         aux_loss_fn: torch.nn.Module,
         gamma: float,
         steps: int,
         batch_size: int,
+        target_update_freq: int,
         step_offset: int = 0,
     ) -> tuple[float, float]:
         total_q_loss = 0.0
         total_aux_loss = 0.0
         for step in tqdm(range(steps), total=steps, desc="Learning"):
             batch = self.experience_buffer.sample_n(batch_size)
-            state_batch = torch.stack(
-                [exp.state for exp in batch],
-                dim=0
-            )
-            legal_moves_mask_batch = torch.stack(
-                [exp.legal_moves_mask for exp in batch],
-                dim=0
-            )
-            action_batch = torch.stack(
-                [exp.action for exp in batch],
-                dim=0
-            )
-            reward_batch = torch.tensor(
-                [exp.reward for exp in batch], device=self.device
-            )
-            next_state_batch = torch.stack(
-                [exp.next_state for exp in batch],
-                dim=0
-            )
-            next_legal_moves_mask_batch = torch.stack(
-                [exp.next_legal_moves_mask for exp in batch],
-                dim=0
-            )
-            done_batch = torch.tensor(
-                [int(exp.done) for exp in batch], device=self.device
-            )
+            state_batch = torch.stack([exp.state for exp in batch], dim=0)
+            legal_moves_mask_batch = torch.stack([exp.legal_moves_mask for exp in batch], dim=0)
+            action_batch = torch.stack([exp.action for exp in batch], dim=0)
+            reward_batch = torch.tensor([exp.reward for exp in batch], device=self.device)
+            next_state_batch = torch.stack([exp.next_state for exp in batch], dim=0)
+            next_legal_moves_mask_batch = torch.stack([exp.next_legal_moves_mask for exp in batch], dim=0)
+            done_batch = torch.tensor([int(exp.done) for exp in batch], device=self.device)
+            opp_done_batch = torch.tensor([int(exp.opp_done) for exp in batch], device=self.device)
 
             predicted_q_values, aux_logits = model(state_batch)
             predicted_q = predicted_q_values.gather(1, action_batch)
 
-            next_q_values, _ = model(next_state_batch)
-            masked_next_q_values = next_q_values.masked_fill(
-                next_legal_moves_mask_batch == 0, -1e10
-            )
-            max_next_q_values = masked_next_q_values.max(1)[0].detach()
-
-            target_q_values = reward_batch + (
-                gamma * max_next_q_values * (1 - done_batch)
-            )
+            # Use target network for next Q-values
+            with torch.no_grad():
+                next_q_values, _ = target_model(next_state_batch)
+                masked_next_q_values = next_q_values.masked_fill(next_legal_moves_mask_batch == 0, -1e10)
+                max_next_q_values = masked_next_q_values.max(1)[0]
+                masked_max_next_q_values = max_next_q_values * (1 - done_batch) * (1 - opp_done_batch)
+                discounted_max_next_q_values = gamma * masked_max_next_q_values
+                target_q_values = reward_batch + discounted_max_next_q_values
 
             # Compute loss
             q_loss = q_loss_fn(predicted_q, target_q_values.unsqueeze(1))
             total_q_loss += q_loss.item()
-            aux_loss = aux_loss_fn(
-                aux_logits,
-                legal_moves_mask_batch
-            )
+            aux_loss = aux_loss_fn(aux_logits, legal_moves_mask_batch)
             total_aux_loss += aux_loss.item()
             loss = q_loss + aux_loss
 
             # Backpropagation
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), app_config.MODEL_CLIP_GRAD
-            )
+            torch.nn.utils.clip_grad_norm_(model.parameters(), app_config.MODEL_CLIP_GRAD)
             optimizer.step()
             optimizer.zero_grad()
 
-            # Log metrics to Tensorboard
             self.writer.add_scalar("Loss/Step", loss.item(), step + step_offset)
             self.writer.add_scalar("QLoss/Step", q_loss.item(), step + step_offset)
             self.writer.add_scalar("AuxLoss/Step", aux_loss.item(), step + step_offset)
+
+            # Update target network
+            if (step + 1) % target_update_freq == 0:
+                target_model.load_state_dict(model.state_dict())
+
         return total_q_loss, total_aux_loss
 
     def eval_model(self, model: ChessCNN, steps: int, batch_size: int, step: int) -> float:
@@ -570,6 +553,9 @@ class CNNTrainer:
         app_config: AppConfig = AppConfig(),
     ) -> ChessCNN:
         model.to(self.device)
+        target_model = ChessCNN(num_filters=model.num_filters, num_residual_blocks=model.num_residual_blocks).to(self.device)
+        target_model.load_state_dict(model.state_dict())
+        target_model.eval()
 
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -578,7 +564,7 @@ class CNNTrainer:
             eta_min=1e-6
         )
 
-        q_loss_fn = F.mse_loss
+        q_loss_fn = torch.nn.SmoothL1Loss()
         aux_loss_fn = F.binary_cross_entropy_with_logits  # Classifying move legality
         epsilon = 1.0
 
@@ -622,12 +608,14 @@ class CNNTrainer:
 
             total_q_loss, total_aux_loss = self.learn(
                 model=model,
+                target_model=target_model,
                 optimizer=optimizer,
                 q_loss_fn=q_loss_fn,
                 aux_loss_fn=aux_loss_fn,
                 gamma=gamma,
                 steps=app_config.MODEL_LEARN_STEPS,
                 batch_size=app_config.MODEL_BATCH_SIZE,
+                target_update_freq=app_config.MODEL_TARGET_UPDATE_FREQ,
                 step_offset=step,
             )
             step += app_config.MODEL_LEARN_STEPS
