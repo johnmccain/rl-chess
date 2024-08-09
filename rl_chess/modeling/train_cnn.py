@@ -5,6 +5,7 @@ import logging
 import pickle
 import random
 import argparse
+import json
 
 import chess
 import pandas as pd
@@ -43,6 +44,7 @@ class CNNTrainer:
         stockfish_evaluator: StockfishEvaluator | None = None,
         device: str | None = None,
         app_config: AppConfig = AppConfig(),
+        model_timestamp: str | None = None,
     ) -> None:
 
         self.stockfish_evaluator = stockfish_evaluator or StockfishEvaluator()
@@ -56,7 +58,7 @@ class CNNTrainer:
         # Load curriculum data
         self.openings_df = pd.read_csv(base_path / "data/openings_fen7.csv")
 
-        self.model_timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.model_timestamp = model_timestamp or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
 
         self.writer = SummaryWriter(
             log_dir=base_path
@@ -122,7 +124,32 @@ class CNNTrainer:
                 os.remove(file)
                 logger.info(f"Deleted old checkpoint file: {file}")
 
-    def select_device(self) -> torch.device:
+    def save_hparams(self, model: ChessCNN, app_config: AppConfig) -> None:
+        hparams = {
+            "MODEL_NUM_FILTERS": app_config.MODEL_NUM_FILTERS,
+            "MODEL_RESIDUAL_BLOCKS": app_config.MODEL_RESIDUAL_BLOCKS,
+            "MODEL_GAMMA": app_config.MODEL_GAMMA,
+            "MODEL_INITIAL_GAMMA": app_config.MODEL_INITIAL_GAMMA,
+            "MODEL_GAMMA_RAMP_STEPS": app_config.MODEL_GAMMA_RAMP_STEPS,
+            "MODEL_LR": app_config.MODEL_LR,
+            "MODEL_DECAY": app_config.MODEL_DECAY,
+            "MODEL_CLIP_GRAD": app_config.MODEL_CLIP_GRAD,
+            "MODEL_BUFFER_SIZE": app_config.MODEL_BUFFER_SIZE,
+            "MODEL_MIN_EPSILON": app_config.MODEL_MIN_EPSILON,
+            "MODEL_EXPLORE_EPISODES": app_config.MODEL_EXPLORE_EPISODES,
+            "MODEL_LEARN_STEPS": app_config.MODEL_LEARN_STEPS,
+            "MODEL_TARGET_UPDATE_FREQ": app_config.MODEL_TARGET_UPDATE_FREQ,
+        }
+        # Save hparams to Tensorboard
+        self.writer.add_hparams(
+            hparam_dict=hparams,
+            metric_dict={},
+        )
+        with open(base_path / app_config.APP_OUTPUT_DIR / f"hparams_{self.model_timestamp}.json", "w") as f:
+            json.dump(hparams, f)
+
+    @staticmethod
+    def select_device() -> torch.device:
         if torch.cuda.is_available():
             logger.info("CUDA available, using GPU")
             device = torch.device("cuda")
@@ -444,53 +471,70 @@ class CNNTrainer:
         self.writer.add_scalar("Validation/AuxLoss/Step", aux_val_loss, step)
         return aux_val_loss
 
+    def fill_experience_buffer(self, model: ChessCNN, epsilon: float, gamma: float, app_config: AppConfig):
+        logger.info("Filling experience buffer")
+        # Fill the experience buffer
+        # We don't count this towards the total number of episodes
+        desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(self.experience_buffer.buffer)
+        estimated_experience_rate = app_config.MODEL_BATCH_SIZE * app_config.MODEL_MAX_MOVES # Estimated experience per episode batch, start with max moves per episode
+
+        while len(self.experience_buffer.buffer) < app_config.MODEL_BUFFER_SIZE:
+            desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(self.experience_buffer.buffer)
+            est_num_episodes = max(int(desired_additional_experience // estimated_experience_rate), 1)
+            new_experiences = self.explore(
+                model, est_num_episodes, gamma, epsilon, app_config.MODEL_BATCH_SIZE
+            )
+            self.experience_buffer.extend(new_experiences)
+            # Update estimated experience rate
+            estimated_experience_rate = len(new_experiences) / est_num_episodes
+            logger.info(f"Experience buffer size: {len(self.experience_buffer.buffer)}/{app_config.MODEL_BUFFER_SIZE}")
+
     def train_deep_q_network_off_policy(
         self,
         model: ChessCNN,
+        optimizer: optim.Optimizer,
         episodes: int,
         app_config: AppConfig = AppConfig(),
+        start_episode: int = 0,
+        start_step: int = 0,
     ) -> ChessCNN:
         model.to(self.device)
         target_model = ChessCNN(num_filters=model.num_filters, num_residual_blocks=model.num_residual_blocks).to(self.device)
         target_model.load_state_dict(model.state_dict())
         target_model.eval()
 
-        optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
+        t_max = episodes//(app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)  # Number of epochs
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=episodes//(app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE),
+            T_max=t_max,
             eta_min=1e-6
         )
 
+        if start_episode > 0:
+            # Convert start_episode to the corresponding epoch
+            start_epoch = start_episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)
+            for _ in range(start_epoch):
+                scheduler.step()
+
         q_loss_fn = torch.nn.SmoothL1Loss()
         aux_loss_fn = F.binary_cross_entropy_with_logits  # Classifying move legality
-        epsilon = 1.0
 
-        # Save hparams to Tensorboard
-        hparams = {
-            "num_filters": model.num_filters,
-            "num_residual_blocks": model.num_residual_blocks,
-            "gamma": app_config.MODEL_GAMMA,
-            "initial_gamma": app_config.MODEL_INITIAL_GAMMA,
-            "gamma_ramp_steps": app_config.MODEL_GAMMA_RAMP_STEPS,
-            "lr": app_config.MODEL_LR,
-            "decay": app_config.MODEL_DECAY,
-            "clip_grad": app_config.MODEL_CLIP_GRAD,
-            "optimizer": str(type(optimizer)),
-        }
-        self.writer.add_hparams(
-            hparam_dict=hparams,
-            metric_dict={},
-        )
+        self.save_hparams(model, app_config)
+
+        episode = start_episode  # episode = 1 game played
+        step = start_step  # step = 1 batch of moves learned
+        last_saved_episode = 0
+        last_eval_episode = 0
 
         gamma_ramp = (
             app_config.MODEL_GAMMA - app_config.MODEL_INITIAL_GAMMA
         ) / app_config.MODEL_GAMMA_RAMP_STEPS
-
-        episode = 0  # episode = 1 game played
-        step = 0  # step = 1 batch of moves learned
-        last_saved_episode = 0
-        last_eval_episode = 0
+        gamma = min(app_config.MODEL_INITIAL_GAMMA, app_config.MODEL_GAMMA + gamma_ramp * episode)
+        epsilon = max(
+            (app_config.MODEL_DECAY) ** (episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)),
+            app_config.MODEL_MIN_EPSILON
+        )
+        self.fill_experience_buffer(model, epsilon, gamma, app_config)
 
         while episode < episodes:
             gamma = min(
@@ -551,10 +595,103 @@ class CNNTrainer:
         return model
 
 
+def find_latest_model_filename(model_timestamp: str | None = None) -> str:
+    """
+    Find the latest filename for a given model timestamp.
+    :param model_timestamp: The timestamp of the model to find the latest file for. If None, the latest model is used.
+    :return: The latest filename for the given model timestamp, or None if no matching model files are found
+    """
+
+    if model_timestamp is None:
+        model_files = list(base_path.glob(f"{app_config.APP_OUTPUT_DIR}/model_*.pt"))
+    else:
+        model_files = list(
+            base_path.glob(f"{app_config.APP_OUTPUT_DIR}/model_{model_timestamp}_e*.pt")
+        )
+    
+    # Sort by episode number
+    sorted_models = sorted(model_files, key=lambda x: int(x.stem.split("_e")[-1]))
+
+    if model_timestamp is None:
+        # Sort by timestamp second
+        # In-place sort means last element is the highest episode number of the newest model
+        sorted_models = sorted(sorted_models, key=lambda x: datetime.datetime.strptime(x.stem.split("_")[1], "%Y%m%d-%H%M%S"))
+    if not sorted_models:
+        return None
+    return str(sorted_models[-1])
+
+
+def load_from_checkpoint(
+    model_filename: str, device: torch.device,
+) -> tuple[ChessCNN, optim.Optimizer, int, dict, str]:
+    # First find the model timestamp from the filename
+    model_timestamp = model_filename.split("_e")[0].split("_")[-1]
+    # Load hparams from the hparams file
+    with open(base_path / app_config.APP_OUTPUT_DIR / f"hparams_{model_timestamp}.json", "rb") as f:
+        hparams = json.load(f)
+
+    # Load the model and optimizer
+    model = ChessCNN(num_filters=hparams["MODEL_NUM_FILTERS"], num_residual_blocks=hparams["MODEL_RESIDUAL_BLOCKS"]).to(device)
+    model.load_state_dict(torch.load(model_filename))
+
+    optimizer = optim.AdamW(model.parameters(), lr=hparams["MODEL_LR"])
+    optimizer.load_state_dict(torch.load(model_filename.replace("model", "optimizer")))
+
+    episode = int(model_filename.split("_e")[-1].split(".")[0])
+    return model, optimizer, episode, hparams, model_timestamp
+
+
 if __name__ == "__main__":
-    app_config = AppConfig()
-    model = ChessCNN(num_filters=256, num_residual_blocks=12)
-    trainer = CNNTrainer(app_config=app_config)
-    trainer.train_deep_q_network_off_policy(
-        model, episodes=200000, app_config=app_config
+    argparser = argparse.ArgumentParser()
+
+    argparser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume training from the latest checkpoint",
     )
+
+    argparser.add_argument(
+        "--timestamp",
+        type=str,
+        help="Timestamp of the model to resume training from. Optional; --resume without timestamp will resume from the latest checkpoint.",
+        required=False,
+    )
+
+    argparser.add_argument(
+        "--episodes",
+        type=int,
+        help="Number of episodes to train for",
+        default=100000,
+    )
+
+    args = argparser.parse_args()
+
+    device = CNNTrainer.select_device()
+    if args.resume:
+        model_filename = find_latest_model_filename(args.timestamp)
+        if model_filename is None:
+            raise FileNotFoundError("No model files found to resume training from")
+        logger.info(f"Resuming training from {model_filename}")
+        model, optimizer, start_episode, hparams, model_timestamp = load_from_checkpoint(model_filename, device)
+        # Ovewrite the app config with the latest values
+        app_config = AppConfig(**hparams)
+        # approximate start step based on learn steps, explore steps, and episode number
+        start_step = (start_episode // (app_config.MODEL_BATCH_SIZE * app_config.MODEL_EXPLORE_EPISODES)) * app_config.MODEL_LEARN_STEPS
+    else:
+        app_config = AppConfig()
+        model = ChessCNN(num_filters=app_config.MODEL_NUM_FILTERS, num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS).to(device)
+        optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
+        model_timestamp = None
+        start_episode = 0
+        start_step = 0
+
+    trainer = CNNTrainer(app_config=app_config, model_timestamp=model_timestamp)
+    trainer.train_deep_q_network_off_policy(
+        model,
+        optimizer,
+        episodes=args.episodes,
+        app_config=app_config,
+        start_episode=start_episode,
+        start_step=start_step,
+    )
+

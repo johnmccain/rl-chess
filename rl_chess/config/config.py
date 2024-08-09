@@ -43,6 +43,8 @@ class AppConfig(BaseModel):
     MODEL_EXPLORE_EPISODES: int = config["model.explore_episodes"]
     MODEL_LEARN_STEPS: int = config["model.learn_steps"]
     MODEL_TARGET_UPDATE_FREQ: int = config["model.target_update_freq"]
+    MODEL_NUM_FILTERS: int = config["model.num_filters"]
+    MODEL_RESIDUAL_BLOCKS: int = config["model.residual_blocks"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]
     STOCKFISH_PROB: float = config["stockfish.prob"]
