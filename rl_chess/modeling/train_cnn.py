@@ -18,7 +18,6 @@ from sklearn.metrics import precision_score, recall_score
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
-from rl_chess.evaluation.stockfish_evaluator import StockfishEvaluator
 from rl_chess.modeling.chess_cnn import ChessCNN  # Import the new ChessCNN model
 from rl_chess.modeling.utils import (
     board_to_tensor,
@@ -41,14 +40,10 @@ logger = logging.getLogger(__name__)
 class CNNTrainer:
     def __init__(
         self,
-        stockfish_evaluator: StockfishEvaluator | None = None,
         device: str | None = None,
         app_config: AppConfig = AppConfig(),
         model_timestamp: str | None = None,
     ) -> None:
-
-        self.stockfish_evaluator = stockfish_evaluator or StockfishEvaluator()
-        self.stockfish_evaluator.set_depth(app_config.STOCKFISH_DEPTH)
 
         if device:
             self.device = torch.device(device)
@@ -173,7 +168,7 @@ class CNNTrainer:
         self, masked_q_values: torch.Tensor, epsilon: float, board: chess.Board
     ) -> torch.Tensor:
         """
-        Select an action based on epsilon-greedy policy or stockfish evaluation.
+        Select an action based on epsilon-greedy policy.
 
         :param masked_q_values: Q-values for the current state with illegal moves masked
         :param epsilon: Exploration rate
