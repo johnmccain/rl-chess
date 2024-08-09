@@ -1,31 +1,31 @@
+import argparse
+import datetime
+import json
+import logging
 import os
 import pathlib
-import datetime
-import logging
 import pickle
 import random
-import argparse
-import json
 
 import chess
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
+from sklearn.metrics import precision_score, recall_score
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from sklearn.metrics import precision_score, recall_score
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
 from rl_chess.modeling.chess_cnn import ChessCNN  # Import the new ChessCNN model
+from rl_chess.modeling.experience_buffer import ExperienceBuffer, ExperienceRecord
 from rl_chess.modeling.utils import (
     board_to_tensor,
     calculate_reward,
     get_legal_moves_mask,
     index_to_move,
 )
-from rl_chess.modeling.experience_buffer import ExperienceBuffer, ExperienceRecord
 
 app_config = AppConfig()
 
@@ -36,6 +36,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
 
 class CNNTrainer:
     def __init__(
@@ -53,7 +54,9 @@ class CNNTrainer:
         # Load curriculum data
         self.openings_df = pd.read_csv(base_path / "data/openings_fen7.csv")
 
-        self.model_timestamp = model_timestamp or datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.model_timestamp = model_timestamp or datetime.datetime.now().strftime(
+            "%Y%m%d-%H%M%S"
+        )
 
         self.writer = SummaryWriter(
             log_dir=base_path
@@ -77,8 +80,7 @@ class CNNTrainer:
 
     def save_experience_buffer(self, filename: str | pathlib.Path) -> None:
         saveable_experience_buffer = [
-            exp.make_serializeable()
-            for exp in self.experience_buffer.buffer
+            exp.make_serializeable() for exp in self.experience_buffer.buffer
         ]
         with open(filename, "wb") as f:
             pickle.dump(saveable_experience_buffer, f)
@@ -87,9 +89,9 @@ class CNNTrainer:
         self, model: ChessCNN, optimizer: optim.Optimizer, episode: int
     ) -> None:
         logger.info(f"Saving checkpoint for episode {episode}")
-        
+
         checkpoint_dir = base_path / app_config.APP_OUTPUT_DIR
-        
+
         # Save current checkpoint
         torch.save(
             model.state_dict(),
@@ -102,17 +104,21 @@ class CNNTrainer:
 
         # Get all checkpoint files for this model
         model_files = list(checkpoint_dir.glob(f"model_{self.model_timestamp}_e*.pt"))
-        optimizer_files = list(checkpoint_dir.glob(f"optimizer_{self.model_timestamp}_e*.pt"))
-        buffer_files = list(checkpoint_dir.glob(f"experience_buffer_{self.model_timestamp}_e*.pkl"))
-        
+        optimizer_files = list(
+            checkpoint_dir.glob(f"optimizer_{self.model_timestamp}_e*.pt")
+        )
+        buffer_files = list(
+            checkpoint_dir.glob(f"experience_buffer_{self.model_timestamp}_e*.pkl")
+        )
+
         # Sort files by episode number
         def get_episode(filename):
-            return int(filename.stem.split('_e')[-1])
-        
+            return int(filename.stem.split("_e")[-1])
+
         model_files.sort(key=get_episode, reverse=True)
         optimizer_files.sort(key=get_episode, reverse=True)
         buffer_files.sort(key=get_episode, reverse=True)
-        
+
         # Keep only the last 5 checkpoints
         for file_list in [model_files, optimizer_files, buffer_files]:
             for file in file_list[5:]:
@@ -140,7 +146,12 @@ class CNNTrainer:
             hparam_dict=hparams,
             metric_dict={},
         )
-        with open(base_path / app_config.APP_OUTPUT_DIR / f"hparams_{self.model_timestamp}.json", "w") as f:
+        with open(
+            base_path
+            / app_config.APP_OUTPUT_DIR
+            / f"hparams_{self.model_timestamp}.json",
+            "w",
+        ) as f:
             json.dump(hparams, f)
 
     @staticmethod
@@ -183,7 +194,12 @@ class CNNTrainer:
         return action
 
     def explore(
-        self, model: ChessCNN, episodes: int, gamma: float, epsilon: float, batch_size: int
+        self,
+        model: ChessCNN,
+        episodes: int,
+        gamma: float,
+        epsilon: float,
+        batch_size: int,
     ) -> list[ExperienceRecord]:
         experience_buffer = []
         for episode in tqdm(range(episodes), total=episodes, desc="Exploring"):
@@ -194,8 +210,14 @@ class CNNTrainer:
             ]
             n_moves = 0
 
-            while boards and not all(board.is_game_over() for board in boards) and n_moves < app_config.MODEL_MAX_MOVES:
-                current_states = torch.stack([board_to_tensor(board, board.turn) for board in boards], dim=0).to(self.device)
+            while (
+                boards
+                and not all(board.is_game_over() for board in boards)
+                and n_moves < app_config.MODEL_MAX_MOVES
+            ):
+                current_states = torch.stack(
+                    [board_to_tensor(board, board.turn) for board in boards], dim=0
+                ).to(self.device)
 
                 ### Calculate Player move ###
 
@@ -207,29 +229,45 @@ class CNNTrainer:
 
                 logger.debug("START Masking illegal moves")
                 # Mask illegal moves
-                legal_moves_mask = torch.stack([get_legal_moves_mask(board) for board in boards], dim=0).to(self.device)
+                legal_moves_mask = torch.stack(
+                    [get_legal_moves_mask(board) for board in boards], dim=0
+                ).to(self.device)
                 masked_q_values = predicted_q_values.masked_fill(
                     legal_moves_mask == 0, -1e10
                 )
                 logger.debug("END Masking illegal moves")
 
                 logger.debug("START Selecting action")
-                actions = torch.stack([
-                    self.select_action(masked_q_values[idx], epsilon, board)
-                    for idx, board in enumerate(boards)
-                ], dim=0)
+                actions = torch.stack(
+                    [
+                        self.select_action(masked_q_values[idx], epsilon, board)
+                        for idx, board in enumerate(boards)
+                    ],
+                    dim=0,
+                )
                 logger.debug("END Selecting action")
 
                 logger.debug("START Taking action & calculating reward")
                 # Take action and observe reward and next state
-                moves = [index_to_move(actions[idx].item(), board) for idx, board in enumerate(boards)]
+                moves = [
+                    index_to_move(actions[idx].item(), board)
+                    for idx, board in enumerate(boards)
+                ]
                 if any(move is None for move in moves):
                     logger.warning("Invalid move selected!")
                     # No handling for invalid moves; just break out of the loop
                     break
-                rewards = torch.tensor([calculate_reward(board, move) for board, move in zip(boards, moves)]).to(self.device)
+                rewards = torch.tensor(
+                    [
+                        calculate_reward(board, move)
+                        for board, move in zip(boards, moves)
+                    ]
+                ).to(self.device)
                 # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
-                default_opp_rewards = [calculate_reward(board, move, flip_perspective=True) for board, move in zip(boards, moves)]
+                default_opp_rewards = [
+                    calculate_reward(board, move, flip_perspective=True)
+                    for board, move in zip(boards, moves)
+                ]
 
                 # Take the action
                 for move, board in zip(moves, boards):
@@ -238,13 +276,14 @@ class CNNTrainer:
 
                 ### Calculate Opponent Move ###
                 logger.debug("START Preparing Opponent move")
-                opp_next_states = torch.stack([
-                    board_to_tensor(board, board.turn)
-                    for board in boards
-                ], dim=0).to(self.device)
+                opp_next_states = torch.stack(
+                    [board_to_tensor(board, board.turn) for board in boards], dim=0
+                ).to(self.device)
 
                 # To process as a batch, we continue processing games that are over with dummy values, but need to ensure that we don't push moves to the board
-                dones = torch.tensor([int(board.is_game_over()) for board in boards], device=self.device)
+                dones = torch.tensor(
+                    [int(board.is_game_over()) for board in boards], device=self.device
+                )
                 logger.debug("END Preparing Opponent move")
 
                 logger.debug("START Predicting Opponent Q values")
@@ -254,12 +293,9 @@ class CNNTrainer:
                 logger.debug("END Predicting Opponent Q values")
 
                 logger.debug("START Masking illegal moves for Opponent")
-                opp_next_legal_moves_mask = torch.stack([
-                    get_legal_moves_mask(board)
-                    for board in boards
-                ], dim=0).to(
-                    self.device
-                )
+                opp_next_legal_moves_mask = torch.stack(
+                    [get_legal_moves_mask(board) for board in boards], dim=0
+                ).to(self.device)
                 opp_masked_next_q_values = opp_next_q_values.masked_fill(
                     opp_next_legal_moves_mask == 0, -1e10
                 )
@@ -267,9 +303,13 @@ class CNNTrainer:
 
                 logger.debug("START Selecting Opponent action")
                 opp_actions = [
-                    self.select_action(
-                        opp_masked_next_q_values[idx], epsilon, board
-                    ) if not done else -1  # -1 is a placeholder when there is no valid move
+                    (
+                        self.select_action(
+                            opp_masked_next_q_values[idx], epsilon, board
+                        )
+                        if not done
+                        else -1
+                    )  # -1 is a placeholder when there is no valid move
                     for idx, (board, done) in enumerate(zip(boards, dones))
                 ]
                 logger.debug("END Selecting Opponent action")
@@ -277,34 +317,35 @@ class CNNTrainer:
                 logger.debug("START Taking Opponent action & calculating reward")
                 # Take opponent action
                 opp_moves = [
-                    index_to_move(opp_action, board)
-                    if opp_action != -1
-                    else None
+                    index_to_move(opp_action, board) if opp_action != -1 else None
                     for opp_action, board in zip(opp_actions, boards)
                 ]
 
                 # Calculate reward for opponent move
-                opp_rewards = torch.tensor([
-                    calculate_reward(board, opp_move)
-                    if opp_move
-                    else default
-                    for opp_move, default, board in zip(opp_moves, default_opp_rewards, boards)
-                ]).to(self.device)
+                opp_rewards = torch.tensor(
+                    [
+                        calculate_reward(board, opp_move) if opp_move else default
+                        for opp_move, default, board in zip(
+                            opp_moves, default_opp_rewards, boards
+                        )
+                    ]
+                ).to(self.device)
                 for board, opp_move in zip(boards, opp_moves):
                     if opp_move:
                         board.push(opp_move)
                 # Check if the game is over after the opponent move
-                opp_dones = torch.tensor([int(board.is_game_over()) for board in boards], device=self.device)
+                opp_dones = torch.tensor(
+                    [int(board.is_game_over()) for board in boards], device=self.device
+                )
                 logger.debug("END Taking Opponent action & calculating reward")
 
                 ### Calculate next state and reward ###
                 # Compute the next-state max Q-value for active player given the opponent's possible move
                 # next_states for done boards are ignored, but we need to provide a tensor of the correct shape so we use the current state (since no move was pushed)
                 logger.debug("START Preparing next state")
-                next_states = torch.stack([
-                    board_to_tensor(board, board.turn)
-                    for board in boards
-                ], dim=0).to(self.device)
+                next_states = torch.stack(
+                    [board_to_tensor(board, board.turn) for board in boards], dim=0
+                ).to(self.device)
                 logger.debug("END Preparing next state")
 
                 logger.debug("START Predicting next Q values")
@@ -313,16 +354,17 @@ class CNNTrainer:
                 logger.debug("END Predicting next Q values")
 
                 logger.debug("START Masking illegal moves for next state")
-                next_legal_moves_mask = torch.stack([
-                    get_legal_moves_mask(board)
-                    for board in boards
-                ], dim=0).to(self.device)
+                next_legal_moves_mask = torch.stack(
+                    [get_legal_moves_mask(board) for board in boards], dim=0
+                ).to(self.device)
 
                 masked_next_q_values = next_q_values.masked_fill(
                     next_legal_moves_mask == 0, -1e10
                 )
                 max_next_q_values = masked_next_q_values.max(1)[0]
-                max_next_q_values[max_next_q_values == -1e10] = 0.0  # Set Q-value to 0.0 for situations where no legal moves are available
+                max_next_q_values[
+                    max_next_q_values == -1e10
+                ] = 0.0  # Set Q-value to 0.0 for situations where no legal moves are available
                 logger.debug("END Masking illegal moves for next state")
 
                 logger.debug("START Calculating target Q value")
@@ -333,9 +375,7 @@ class CNNTrainer:
 
                 # Handle boards where opponent had no valid moves (game was over)
                 # NOTE: is 0.0 the correct default value for max_next_q_values?
-                max_next_q_values.masked_fill(
-                    dones == 1, 0.0
-                )
+                max_next_q_values.masked_fill(dones == 1, 0.0)
                 # Compute the target Q-value
                 target_q_value = (
                     rewards - opp_rewards + (gamma * max_next_q_values * (1 - dones))
@@ -345,8 +385,32 @@ class CNNTrainer:
 
                 logger.debug("START Creating ExperienceRecord")
                 # Create separate ExperienceRecord for each board
-                for current_state, legal_mask, action, reward, next_state, next_legal_mask, done, opp_done, predicted_q, target_q_value, pred_q, max_next_q in zip(
-                    current_states, legal_moves_mask, actions, rewards, next_states, next_legal_moves_mask, dones, opp_dones, predicted_q, target_q_value, predicted_q_values, max_next_q_values
+                for (
+                    current_state,
+                    legal_mask,
+                    action,
+                    reward,
+                    next_state,
+                    next_legal_mask,
+                    done,
+                    opp_done,
+                    predicted_q,
+                    target_q_value,
+                    pred_q,
+                    max_next_q,
+                ) in zip(
+                    current_states,
+                    legal_moves_mask,
+                    actions,
+                    rewards,
+                    next_states,
+                    next_legal_moves_mask,
+                    dones,
+                    opp_dones,
+                    predicted_q,
+                    target_q_value,
+                    predicted_q_values,
+                    max_next_q_values,
                 ):
                     experience_buffer.append(
                         ExperienceRecord(
@@ -360,7 +424,7 @@ class CNNTrainer:
                             done=bool(done),
                             opp_done=bool(opp_done),
                             pred_q_values=pred_q,
-                            max_next_q=max_next_q.item()
+                            max_next_q=max_next_q.item(),
                         )
                     )
                 logger.debug("END Creating ExperienceRecord")
@@ -387,13 +451,23 @@ class CNNTrainer:
         for step in tqdm(range(steps), total=steps, desc="Learning"):
             batch = self.experience_buffer.sample_n(batch_size)
             state_batch = torch.stack([exp.state for exp in batch], dim=0)
-            legal_moves_mask_batch = torch.stack([exp.legal_moves_mask for exp in batch], dim=0)
+            legal_moves_mask_batch = torch.stack(
+                [exp.legal_moves_mask for exp in batch], dim=0
+            )
             action_batch = torch.stack([exp.action for exp in batch], dim=0)
-            reward_batch = torch.tensor([exp.reward for exp in batch], device=self.device)
+            reward_batch = torch.tensor(
+                [exp.reward for exp in batch], device=self.device
+            )
             next_state_batch = torch.stack([exp.next_state for exp in batch], dim=0)
-            next_legal_moves_mask_batch = torch.stack([exp.next_legal_moves_mask for exp in batch], dim=0)
-            done_batch = torch.tensor([int(exp.done) for exp in batch], device=self.device)
-            opp_done_batch = torch.tensor([int(exp.opp_done) for exp in batch], device=self.device)
+            next_legal_moves_mask_batch = torch.stack(
+                [exp.next_legal_moves_mask for exp in batch], dim=0
+            )
+            done_batch = torch.tensor(
+                [int(exp.done) for exp in batch], device=self.device
+            )
+            opp_done_batch = torch.tensor(
+                [int(exp.opp_done) for exp in batch], device=self.device
+            )
 
             predicted_q_values, aux_logits = model(state_batch)
             predicted_q = predicted_q_values.gather(1, action_batch)
@@ -401,9 +475,13 @@ class CNNTrainer:
             # Use target network for next Q-values
             with torch.no_grad():
                 next_q_values, _ = target_model(next_state_batch)
-                masked_next_q_values = next_q_values.masked_fill(next_legal_moves_mask_batch == 0, -1e10)
+                masked_next_q_values = next_q_values.masked_fill(
+                    next_legal_moves_mask_batch == 0, -1e10
+                )
                 max_next_q_values = masked_next_q_values.max(1)[0]
-                masked_max_next_q_values = max_next_q_values * (1 - done_batch) * (1 - opp_done_batch)
+                masked_max_next_q_values = (
+                    max_next_q_values * (1 - done_batch) * (1 - opp_done_batch)
+                )
                 discounted_max_next_q_values = gamma * masked_max_next_q_values
                 target_q_values = reward_batch + discounted_max_next_q_values
 
@@ -416,7 +494,9 @@ class CNNTrainer:
 
             # Backpropagation
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), app_config.MODEL_CLIP_GRAD)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), app_config.MODEL_CLIP_GRAD
+            )
             optimizer.step()
             optimizer.zero_grad()
 
@@ -430,7 +510,9 @@ class CNNTrainer:
 
         return total_q_loss, total_aux_loss
 
-    def eval_model(self, model: ChessCNN, steps: int, batch_size: int, step: int) -> float:
+    def eval_model(
+        self, model: ChessCNN, steps: int, batch_size: int, step: int
+    ) -> float:
         """
         Evaluate the model. Currently only evaluates based on auxiliary task accuracy (move legality).
         """
@@ -441,20 +523,18 @@ class CNNTrainer:
         targets = []
         for _ in tqdm(range(steps), total=steps, desc="Evaluating"):
             batch = self.experience_buffer.sample_n(batch_size)
-            state_batch = torch.stack(
-                [exp.state for exp in batch],
-                dim=0
-            )
+            state_batch = torch.stack([exp.state for exp in batch], dim=0)
             legal_moves_mask_batch = torch.stack(
-                [exp.legal_moves_mask for exp in batch],
-                dim=0
+                [exp.legal_moves_mask for exp in batch], dim=0
             )
             with torch.no_grad():
                 _, aux_logits = model(state_batch)
             predicted_labels = torch.round(torch.sigmoid(aux_logits))
             correct += (predicted_labels == legal_moves_mask_batch).sum().item()
             total += legal_moves_mask_batch.numel()
-            aux_val_loss += F.binary_cross_entropy_with_logits(aux_logits, legal_moves_mask_batch).item()
+            aux_val_loss += F.binary_cross_entropy_with_logits(
+                aux_logits, legal_moves_mask_batch
+            ).item()
             predictions.extend(predicted_labels.cpu().numpy().flatten())
             targets.extend(legal_moves_mask_batch.cpu().numpy().flatten())
         accuracy = correct / total
@@ -466,23 +546,35 @@ class CNNTrainer:
         self.writer.add_scalar("Validation/AuxLoss/Step", aux_val_loss, step)
         return aux_val_loss
 
-    def fill_experience_buffer(self, model: ChessCNN, epsilon: float, gamma: float, app_config: AppConfig):
+    def fill_experience_buffer(
+        self, model: ChessCNN, epsilon: float, gamma: float, app_config: AppConfig
+    ):
         logger.info("Filling experience buffer")
         # Fill the experience buffer
         # We don't count this towards the total number of episodes
-        desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(self.experience_buffer.buffer)
-        estimated_experience_rate = app_config.MODEL_BATCH_SIZE * app_config.MODEL_MAX_MOVES # Estimated experience per episode batch, start with max moves per episode
+        desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(
+            self.experience_buffer.buffer
+        )
+        estimated_experience_rate = (
+            app_config.MODEL_BATCH_SIZE * app_config.MODEL_MAX_MOVES
+        )  # Estimated experience per episode batch, start with max moves per episode
 
         while len(self.experience_buffer.buffer) < app_config.MODEL_BUFFER_SIZE:
-            desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(self.experience_buffer.buffer)
-            est_num_episodes = max(int(desired_additional_experience // estimated_experience_rate), 1)
+            desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(
+                self.experience_buffer.buffer
+            )
+            est_num_episodes = max(
+                int(desired_additional_experience // estimated_experience_rate), 1
+            )
             new_experiences = self.explore(
                 model, est_num_episodes, gamma, epsilon, app_config.MODEL_BATCH_SIZE
             )
             self.experience_buffer.extend(new_experiences)
             # Update estimated experience rate
             estimated_experience_rate = len(new_experiences) / est_num_episodes
-            logger.info(f"Experience buffer size: {len(self.experience_buffer.buffer)}/{app_config.MODEL_BUFFER_SIZE}")
+            logger.info(
+                f"Experience buffer size: {len(self.experience_buffer.buffer)}/{app_config.MODEL_BUFFER_SIZE}"
+            )
 
     def train_deep_q_network_off_policy(
         self,
@@ -494,20 +586,24 @@ class CNNTrainer:
         start_step: int = 0,
     ) -> ChessCNN:
         model.to(self.device)
-        target_model = ChessCNN(num_filters=model.num_filters, num_residual_blocks=model.num_residual_blocks).to(self.device)
+        target_model = ChessCNN(
+            num_filters=model.num_filters, num_residual_blocks=model.num_residual_blocks
+        ).to(self.device)
         target_model.load_state_dict(model.state_dict())
         target_model.eval()
 
-        t_max = episodes//(app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)  # Number of epochs
+        t_max = episodes // (
+            app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
+        )  # Number of epochs
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=t_max,
-            eta_min=1e-6
+            optimizer, T_max=t_max, eta_min=1e-6
         )
 
         if start_episode > 0:
             # Convert start_episode to the corresponding epoch
-            start_epoch = start_episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)
+            start_epoch = start_episode // (
+                app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
+            )
             for _ in range(start_epoch):
                 scheduler.step()
 
@@ -524,21 +620,34 @@ class CNNTrainer:
         gamma_ramp = (
             app_config.MODEL_GAMMA - app_config.MODEL_INITIAL_GAMMA
         ) / app_config.MODEL_GAMMA_RAMP_STEPS
-        gamma = min(app_config.MODEL_INITIAL_GAMMA, app_config.MODEL_GAMMA + gamma_ramp * max(episode - app_config.MODEL_GAMMA_STARTUP_STEPS, 0))
+        gamma = min(
+            app_config.MODEL_INITIAL_GAMMA,
+            app_config.MODEL_GAMMA
+            + gamma_ramp * max(episode - app_config.MODEL_GAMMA_STARTUP_STEPS, 0),
+        )
         epsilon = max(
-            (app_config.MODEL_DECAY) ** (episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)),
-            app_config.MODEL_MIN_EPSILON
+            (app_config.MODEL_DECAY)
+            ** (
+                episode
+                // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)
+            ),
+            app_config.MODEL_MIN_EPSILON,
         )
         self.fill_experience_buffer(model, epsilon, gamma, app_config)
 
         while episode < episodes:
             gamma = min(
-                app_config.MODEL_INITIAL_GAMMA + gamma_ramp * max(episode - app_config.MODEL_GAMMA_STARTUP_STEPS, 0),
+                app_config.MODEL_INITIAL_GAMMA
+                + gamma_ramp * max(episode - app_config.MODEL_GAMMA_STARTUP_STEPS, 0),
                 app_config.MODEL_GAMMA,
             )
 
             new_experiences = self.explore(
-                model, app_config.MODEL_EXPLORE_EPISODES, gamma, epsilon, app_config.MODEL_BATCH_SIZE
+                model,
+                app_config.MODEL_EXPLORE_EPISODES,
+                gamma,
+                epsilon,
+                app_config.MODEL_BATCH_SIZE,
             )
             self.experience_buffer.extend(new_experiences)
             episode += app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
@@ -564,21 +673,29 @@ class CNNTrainer:
             self.writer.add_scalar("Gamma/Step", gamma, step)
             self.writer.add_scalar("LR/Step", scheduler.get_last_lr()[0], step)
 
-            logger.info(f"Episode {episode}, QLoss: {total_q_loss}, AuxLoss: {total_aux_loss}")
+            logger.info(
+                f"Episode {episode}, QLoss: {total_q_loss}, AuxLoss: {total_aux_loss}"
+            )
 
             if episode - last_saved_episode > app_config.APP_SAVE_STEPS:
                 self.save_checkpoint(model, optimizer, episode)
                 last_saved_episode = episode
 
             if episode - last_eval_episode > app_config.APP_EVAL_STEPS:
-                aux_val_loss = self.eval_model(model, 10, app_config.MODEL_BATCH_SIZE, step)
+                aux_val_loss = self.eval_model(
+                    model, 10, app_config.MODEL_BATCH_SIZE, step
+                )
                 logger.info(f"Episode {episode}, Validation Aux Loss: {aux_val_loss}")
                 last_eval_episode = episode
 
             # Epsilon decay
             epsilon = max(
-                (app_config.MODEL_DECAY) ** (episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)),
-                app_config.MODEL_MIN_EPSILON
+                (app_config.MODEL_DECAY)
+                ** (
+                    episode
+                    // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)
+                ),
+                app_config.MODEL_MIN_EPSILON,
             )
 
             # Learning rate scheduler
@@ -603,30 +720,41 @@ def find_latest_model_filename(model_timestamp: str | None = None) -> str:
         model_files = list(
             base_path.glob(f"{app_config.APP_OUTPUT_DIR}/model_{model_timestamp}_e*.pt")
         )
-    
+
     # Sort by episode number
     sorted_models = sorted(model_files, key=lambda x: int(x.stem.split("_e")[-1]))
 
     if model_timestamp is None:
         # Sort by timestamp second
         # In-place sort means last element is the highest episode number of the newest model
-        sorted_models = sorted(sorted_models, key=lambda x: datetime.datetime.strptime(x.stem.split("_")[1], "%Y%m%d-%H%M%S"))
+        sorted_models = sorted(
+            sorted_models,
+            key=lambda x: datetime.datetime.strptime(
+                x.stem.split("_")[1], "%Y%m%d-%H%M%S"
+            ),
+        )
     if not sorted_models:
         return None
     return str(sorted_models[-1])
 
 
 def load_from_checkpoint(
-    model_filename: str, device: torch.device,
+    model_filename: str,
+    device: torch.device,
 ) -> tuple[ChessCNN, optim.Optimizer, int, dict, str]:
     # First find the model timestamp from the filename
     model_timestamp = model_filename.split("_e")[0].split("_")[-1]
     # Load hparams from the hparams file
-    with open(base_path / app_config.APP_OUTPUT_DIR / f"hparams_{model_timestamp}.json", "rb") as f:
+    with open(
+        base_path / app_config.APP_OUTPUT_DIR / f"hparams_{model_timestamp}.json", "rb"
+    ) as f:
         hparams = json.load(f)
 
     # Load the model and optimizer
-    model = ChessCNN(num_filters=hparams["MODEL_NUM_FILTERS"], num_residual_blocks=hparams["MODEL_RESIDUAL_BLOCKS"]).to(device)
+    model = ChessCNN(
+        num_filters=hparams["MODEL_NUM_FILTERS"],
+        num_residual_blocks=hparams["MODEL_RESIDUAL_BLOCKS"],
+    ).to(device)
     model.load_state_dict(torch.load(model_filename))
 
     optimizer = optim.AdamW(model.parameters(), lr=hparams["MODEL_LR"])
@@ -667,14 +795,26 @@ if __name__ == "__main__":
         if model_filename is None:
             raise FileNotFoundError("No model files found to resume training from")
         logger.info(f"Resuming training from {model_filename}")
-        model, optimizer, start_episode, hparams, model_timestamp = load_from_checkpoint(model_filename, device)
+        (
+            model,
+            optimizer,
+            start_episode,
+            hparams,
+            model_timestamp,
+        ) = load_from_checkpoint(model_filename, device)
         # Ovewrite the app config with the latest values
         app_config = AppConfig(**hparams)
         # approximate start step based on learn steps, explore steps, and episode number
-        start_step = (start_episode // (app_config.MODEL_BATCH_SIZE * app_config.MODEL_EXPLORE_EPISODES)) * app_config.MODEL_LEARN_STEPS
+        start_step = (
+            start_episode
+            // (app_config.MODEL_BATCH_SIZE * app_config.MODEL_EXPLORE_EPISODES)
+        ) * app_config.MODEL_LEARN_STEPS
     else:
         app_config = AppConfig()
-        model = ChessCNN(num_filters=app_config.MODEL_NUM_FILTERS, num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS).to(device)
+        model = ChessCNN(
+            num_filters=app_config.MODEL_NUM_FILTERS,
+            num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS,
+        ).to(device)
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
         model_timestamp = None
         start_episode = 0
@@ -689,4 +829,3 @@ if __name__ == "__main__":
         start_episode=start_episode,
         start_step=start_step,
     )
-

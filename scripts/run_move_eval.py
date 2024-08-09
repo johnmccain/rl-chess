@@ -1,5 +1,6 @@
 import argparse
 import logging
+
 import pandas as pd
 
 from rl_chess import base_path
@@ -27,10 +28,15 @@ def main(args: argparse.Namespace):
     if args.dataset_path:
         df = pd.read_csv(args.dataset_path)
     else:
-        df = pd.read_csv(base_path/"data"/app_config.APP_MOVE_EVAL_DATASET)
+        df = pd.read_csv(base_path / "data" / app_config.APP_MOVE_EVAL_DATASET)
 
     stockfish_evaluator.set_depth(app_config.STOCKFISH_DEPTH)
-    average_move_quality, blunder_rate, optimal_rate, type_breakout = stockfish_evaluator.evaluate_move_ratings(agent, df, progress=True)
+    (
+        average_move_quality,
+        blunder_rate,
+        optimal_rate,
+        type_breakout,
+    ) = stockfish_evaluator.evaluate_move_ratings(agent, df, progress=True)
 
     logger.info("Completed move evaluation.")
     logger.info(f"Average move quality: {average_move_quality}")
