@@ -524,7 +524,7 @@ class CNNTrainer:
         gamma_ramp = (
             app_config.MODEL_GAMMA - app_config.MODEL_INITIAL_GAMMA
         ) / app_config.MODEL_GAMMA_RAMP_STEPS
-        gamma = min(app_config.MODEL_INITIAL_GAMMA, app_config.MODEL_GAMMA + gamma_ramp * episode)
+        gamma = min(app_config.MODEL_INITIAL_GAMMA, app_config.MODEL_GAMMA + gamma_ramp * max(episode - app_config.MODEL_GAMMA_STARTUP_STEPS, 0))
         epsilon = max(
             (app_config.MODEL_DECAY) ** (episode // (app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE)),
             app_config.MODEL_MIN_EPSILON
@@ -533,7 +533,7 @@ class CNNTrainer:
 
         while episode < episodes:
             gamma = min(
-                app_config.MODEL_INITIAL_GAMMA + gamma_ramp * episode,
+                app_config.MODEL_INITIAL_GAMMA + gamma_ramp * max(episode - app_config.MODEL_GAMMA_STARTUP_STEPS, 0),
                 app_config.MODEL_GAMMA,
             )
 
