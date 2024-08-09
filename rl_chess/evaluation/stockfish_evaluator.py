@@ -1,12 +1,15 @@
 import logging
+import collections
 from typing import Iterable
 
+from tqdm import tqdm
 import chess
 import numpy as np
+import pandas as pd
+from stockfish import Stockfish
 
 from rl_chess.config.config import AppConfig
 from rl_chess.inference.inference import ChessAgent
-from stockfish import Stockfish
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +44,89 @@ class StockfishEvaluator:
         """
         Evaluate the quality of a move according to the Stockfish engine.
         """
+        # Evaluate the current board position
         self.stockfish.set_fen_position(board.fen())
-        self.stockfish.set_position([move.uci()])
-        return self.stockfish.get_evaluation().get("value", 0.0)
+        before_eval = self.stockfish.get_evaluation().get("value", 0.0)
+
+        # Apply the move to the board
+        board.push(move)
+
+        # Evaluate the new board position
+        self.stockfish.set_fen_position(board.fen())
+        after_eval = self.stockfish.get_evaluation().get("value", 0.0)
+
+        # Undo the move to return to the original position
+        board.pop()
+
+        # Calculate the difference in evaluation
+        return after_eval - before_eval
+
+    def evaluate_move_ratings(
+        self,
+        chess_agent: ChessAgent,
+        fen_dataset: pd.DataFrame,
+        blunder_threshold: int = -100,
+        progress: bool = True,
+    ) -> tuple[float, float, float, dict]:
+        """
+        Evaluate the chess model using the given FEN dataset based on stockfish evaluations of individual moves.
+        Evaluates as per the following KPIs:
+        1. Average Move Quality (AMQ) - Average evaluation of the model's moves
+        2. Blunder Rate (BR) - Rate of moves rated below the blunder threshold
+        3. Optimality Rate (OR) - Rate of optimal moves
+
+        :param chess_agent:
+        :param fen_dataset: dataframe with two columns: 'fen' and 'type'. 'type' is used for logging more granular results.
+        :param blunder_threshold: Threshold for considering a move as a blunder (in centipawns).
+        :param progress: Whether to display a progress bar.
+        :returns: Tuple containing the Average Move Quality (AMQ), Blunder Rate (BR), Optimality Rate (OR), and a dictionary of KPIs per type.
+        """
+        total_move_quality = 0.0
+        blunders = 0
+        optimal_moves = 0
+        total_moves = len(fen_dataset)
+        quality_per_type = collections.defaultdict(float)
+        blunders_per_type = collections.defaultdict(int)
+        optimal_moves_per_type = collections.defaultdict(int)
+        count_per_type = collections.defaultdict(int)
+
+        iterable = zip(fen_dataset["fen"], fen_dataset["type"])
+        if progress:
+            iterable = tqdm(iterable, total=total_moves, desc="Evaluating moves")
+        for fen, type in iterable:
+            board = chess.Board(fen)
+            count_per_type[type] += 1
+
+            model_move = chess_agent.select_top_rated_move(board)
+
+            move_quality = self.rate_action(board, model_move)
+            total_move_quality += move_quality
+            quality_per_type[type] += move_quality
+
+            if move_quality < blunder_threshold:
+                blunders += 1
+                blunders_per_type[type] += 1
+
+            # Check for optimal move (if the move matches Stockfish's top move)
+            stockfish_best_move = self.move(board)
+            if model_move == stockfish_best_move:
+                optimal_moves += 1
+                optimal_moves_per_type[type] += 1
+
+        # Calculate the KPIs
+        average_move_quality = total_move_quality / total_moves
+        blunder_rate = blunders / total_moves  # Rate of moves that were blunders
+        optimality_ratio = optimal_moves / total_moves  # Rate of optimal moves
+
+        kpis_per_type = {}
+        for type in count_per_type:
+            kpis_per_type[type] = {
+                "AverageMoveQuality": quality_per_type[type] / count_per_type[type],
+                "BlunderRate": blunders_per_type[type] / count_per_type[type],
+                "OptimalityRate": optimal_moves_per_type[type] / count_per_type[type],
+            }
+
+        return average_move_quality, blunder_rate, optimality_ratio, kpis_per_type
 
     def take_action(self, board: chess.Board) -> int:
         """
