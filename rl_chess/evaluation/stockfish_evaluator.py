@@ -37,6 +37,14 @@ class StockfishEvaluator:
                 return move
         return None
 
+    def rate_action(self, board: chess.Board, move: chess.Move) -> float:
+        """
+        Evaluate the quality of a move according to the Stockfish engine.
+        """
+        self.stockfish.set_fen_position(board.fen())
+        self.stockfish.set_position([move.uci()])
+        return self.stockfish.get_evaluation().get("value", 0.0)
+
     def take_action(self, board: chess.Board) -> int:
         """
         Select the best move according to the Stockfish engine. Return as an integer such that
@@ -51,13 +59,19 @@ class StockfishEvaluator:
         return from_index * 64 + to_index
 
     def simulate_games(
-        self, chess_agent: ChessAgent, games_per_elo=10, elo_range: Iterable[int] | None = None, depth_range: Iterable[int] | None = None
+        self,
+        chess_agent: ChessAgent,
+        games_per_elo=10,
+        elo_range: Iterable[int] | None = None,
+        depth_range: Iterable[int] | None = None,
     ) -> tuple[int, int, int, int]:
         results = []
         if elo_range is None and depth_range is None:
             raise ValueError("elo_range or depth_range must be provided.")
         if elo_range is not None and depth_range is not None:
-            raise ValueError("elo_range and depth_range cannot be provided simultaneously.")
+            raise ValueError(
+                "elo_range and depth_range cannot be provided simultaneously."
+            )
         elif elo_range is not None:
             use_elo = True
         else:
@@ -95,7 +109,9 @@ class StockfishEvaluator:
                     draws += 1
 
             results.append((difficulty, wins, losses, draws))
-            print(f"Difficulty {difficulty}: {wins} wins, {losses} losses, {draws} draws")
+            print(
+                f"Difficulty {difficulty}: {wins} wins, {losses} losses, {draws} draws"
+            )
 
         return results
 
