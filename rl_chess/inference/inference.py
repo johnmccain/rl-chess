@@ -53,7 +53,7 @@ class ChessAgent:
 
         :returns: The trained ChessCNN model.
         """
-        model = ChessCNN(num_filters=256, num_residual_blocks=12)
+        model = ChessCNN(num_filters=app_config.MODEL_NUM_FILTERS, num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS)
         logger.info(
             f"Loading model from {base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME}"
         )
@@ -93,10 +93,10 @@ class ChessAgent:
 
         # Convert this index back to a chess move
         best_move = index_to_move(best_move_index, board)
-        logger.info(f"Best move: {best_move}")
+        logger.debug(f"Best move: {best_move}")
 
         best_move_score = masked_q_values[best_move_index].item()
-        logger.info(f"Best move score: {best_move_score}")
+        logger.debug(f"Best move score: {best_move_score}")
 
         return best_move
 
