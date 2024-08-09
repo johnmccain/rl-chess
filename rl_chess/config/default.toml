@@ -3,9 +3,10 @@ TENSORBOARD_DIR = "tensorboard"
 OUTPUT_DIR = "out"
 SAVE_STEPS = 2000
 EVAL_STEPS = 500
+MOVE_EVAL_DATASET = "fen_validation_dataset.csv"
 
 # MODEL_NAME = "model_20240728-182541_final.pt"
-MODEL_NAME = "model_20240808-165625_e14784.pt"
+MODEL_NAME = "model_20240808-165625_e36096.pt"
 
 [LOG]
 LEVEL = "INFO"

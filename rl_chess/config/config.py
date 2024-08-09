@@ -26,6 +26,7 @@ class AppConfig(BaseModel):
     APP_SAVE_STEPS: int = config["app.save_steps"]
     APP_EVAL_STEPS: int = config["app.eval_steps"]
     APP_MODEL_NAME: str = config["app.model_name"]
+    APP_MOVE_EVAL_DATASET: str = config["app.move_eval_dataset"]
 
     LOG_LEVEL: str = config["log.level"]
 
