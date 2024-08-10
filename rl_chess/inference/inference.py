@@ -203,8 +203,8 @@ class MinimaxAgent:
 
         best_move = None
         best_moves = []
+        max_eval = float("-inf")
         if maximizing_player:
-            max_eval = float("-inf")
             for move in board.legal_moves:
                 board.push(move)
                 _, eval = self.alpha_beta_search(board, depth - 1, alpha, beta, False)
