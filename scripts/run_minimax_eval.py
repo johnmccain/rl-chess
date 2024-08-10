@@ -1,8 +1,8 @@
 import chess
 from chess import Board, Move
-from rl_chess.inference.inference import ChessAgent, MinimaxAgent
-from rl_chess.config.config import AppConfig
 
+from rl_chess.config.config import AppConfig
+from rl_chess.inference.inference import ChessAgent, MinimaxAgent
 
 chess_agent = ChessAgent(
     app_config=AppConfig(),
@@ -11,7 +11,10 @@ chess_agent = ChessAgent(
 minimax_agent = MinimaxAgent(1)
 app_config = AppConfig()
 
-def simulate_game(chess_agent: ChessAgent, minimax_agent: MinimaxAgent, depth: int) -> tuple[int, int]:
+
+def simulate_game(
+    chess_agent: ChessAgent, minimax_agent: MinimaxAgent, depth: int
+) -> tuple[int, int]:
     board = Board()
     while not board.is_game_over():
         if board.turn == chess.WHITE:
@@ -25,6 +28,7 @@ def simulate_game(chess_agent: ChessAgent, minimax_agent: MinimaxAgent, depth: i
         return 0, 1
     else:
         return 0, 0
+
 
 N_GAMES = 100
 

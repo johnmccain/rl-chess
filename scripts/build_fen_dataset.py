@@ -1,7 +1,7 @@
-from typing import TypeVar, Iterable
 import argparse
 import logging
 import random
+from typing import Iterable, TypeVar
 
 import chess
 import chess.pgn
@@ -10,9 +10,7 @@ from tqdm import tqdm
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
-from rl_chess.modeling.utils import (
-    calculate_material_score,
-)
+from rl_chess.modeling.utils import calculate_material_score
 
 app_config = AppConfig()
 
@@ -25,6 +23,7 @@ EARLY_GAME_THRESHOLD = 15
 ENDGAME_PIECE_COUNT = 12
 
 T = TypeVar("T")
+
 
 def reservoir_sampling(iterable: Iterable[T], k: int) -> list[T]:
     """
@@ -77,7 +76,9 @@ def categorize_board_state(board: chess.Board, move_count: int) -> str:
 def main(args: argparse.Namespace):
 
     logging.info(f"Reading PGN file from {args.pgn_path}")
-    logging.info(f"Sampling {6 * args.sample_size_per_category} states from {args.n_games} games")
+    logging.info(
+        f"Sampling {6 * args.sample_size_per_category} states from {args.n_games} games"
+    )
 
     early_game_states: list[str] = []
     midgame_states: list[str] = []
@@ -116,26 +117,54 @@ def main(args: argparse.Namespace):
                     fen = board.fen()
 
                     if phase == "early_game":
-                        reservoir_sample_update(early_game_states, fen, args.sample_size_per_category, early_game_count)
+                        reservoir_sample_update(
+                            early_game_states,
+                            fen,
+                            args.sample_size_per_category,
+                            early_game_count,
+                        )
                         early_game_count += 1
                     elif phase == "midgame":
-                        reservoir_sample_update(midgame_states, fen, args.sample_size_per_category, midgame_count)
+                        reservoir_sample_update(
+                            midgame_states,
+                            fen,
+                            args.sample_size_per_category,
+                            midgame_count,
+                        )
                         midgame_count += 1
                     elif phase == "endgame":
-                        reservoir_sample_update(endgame_states, fen, args.sample_size_per_category, endgame_count)
+                        reservoir_sample_update(
+                            endgame_states,
+                            fen,
+                            args.sample_size_per_category,
+                            endgame_count,
+                        )
                         endgame_count += 1
 
                     threshold = args.advantage_threshold
                     material_score = calculate_material_score(board)
                     if material_score > threshold:
-                        reservoir_sample_update(advantageous_material_states, fen, args.sample_size_per_category, adv_material_count)
+                        reservoir_sample_update(
+                            advantageous_material_states,
+                            fen,
+                            args.sample_size_per_category,
+                            adv_material_count,
+                        )
                         adv_material_count += 1
                     elif material_score < -threshold:
-                        reservoir_sample_update(disadvantageous_material_states, fen, args.sample_size_per_category, disadv_material_count)
+                        reservoir_sample_update(
+                            disadvantageous_material_states,
+                            fen,
+                            args.sample_size_per_category,
+                            disadv_material_count,
+                        )
                         disadv_material_count += 1
 
                 if board.is_checkmate() and last_board:
-                    checkmate_states = reservoir_sampling(checkmate_states + [last_board.fen()], args.sample_size_per_category)
+                    checkmate_states = reservoir_sampling(
+                        checkmate_states + [last_board.fen()],
+                        args.sample_size_per_category,
+                    )
 
             except Exception as e:
                 logger.warning(f"Error processing game: {e}")
@@ -143,18 +172,9 @@ def main(args: argparse.Namespace):
             progress.update(1)
 
     df = pd.DataFrame(
-        [
-            {"fen": fen, "type": "early_game"}
-            for fen in early_game_states
-        ]
-        + [
-            {"fen": fen, "type": "midgame"}
-            for fen in midgame_states
-        ]
-        + [
-            {"fen": fen, "type": "endgame"}
-            for fen in endgame_states
-        ]
+        [{"fen": fen, "type": "early_game"} for fen in early_game_states]
+        + [{"fen": fen, "type": "midgame"} for fen in midgame_states]
+        + [{"fen": fen, "type": "endgame"} for fen in endgame_states]
         + [
             {"fen": fen, "type": "advantageous_material"}
             for fen in advantageous_material_states
@@ -163,10 +183,7 @@ def main(args: argparse.Namespace):
             {"fen": fen, "type": "disadvantageous_material"}
             for fen in disadvantageous_material_states
         ]
-        + [
-            {"fen": fen, "type": "checkmate"}
-            for fen in checkmate_states
-        ]
+        + [{"fen": fen, "type": "checkmate"} for fen in checkmate_states]
     )
     # Filter out illegal moves
     df = df[[bool(chess.Board(fen).legal_moves) for fen in df["fen"]]]

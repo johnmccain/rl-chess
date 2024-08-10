@@ -368,9 +368,9 @@ class CNNTrainer:
                     next_legal_moves_mask == 0, -1e10
                 )
                 max_next_q_values = masked_next_q_values.max(1)[0]
-                max_next_q_values[max_next_q_values == -1e10] = (
-                    0.0  # Set Q-value to 0.0 for situations where no legal moves are available
-                )
+                max_next_q_values[
+                    max_next_q_values == -1e10
+                ] = 0.0  # Set Q-value to 0.0 for situations where no legal moves are available
                 logger.debug("END Masking illegal moves for next state")
 
                 logger.debug("START Calculating target Q value")
@@ -527,20 +527,18 @@ class CNNTrainer:
         targets = []
         for _ in tqdm(range(steps), total=steps, desc="Evaluating"):
             batch = self.experience_buffer.sample_n(batch_size)
-            state_batch = torch.stack(
-                [exp.state for exp in batch],
-                dim=0
-            )
+            state_batch = torch.stack([exp.state for exp in batch], dim=0)
             legal_moves_mask_batch = torch.stack(
-                [exp.legal_moves_mask for exp in batch],
-                dim=0
+                [exp.legal_moves_mask for exp in batch], dim=0
             )
             with torch.no_grad():
                 _, aux_logits = model(state_batch)
             predicted_labels = torch.round(torch.sigmoid(aux_logits))
             correct += (predicted_labels == legal_moves_mask_batch).sum().item()
             total += legal_moves_mask_batch.numel()
-            aux_val_loss += F.binary_cross_entropy_with_logits(aux_logits, legal_moves_mask_batch).item()
+            aux_val_loss += F.binary_cross_entropy_with_logits(
+                aux_logits, legal_moves_mask_batch
+            ).item()
             predictions.extend(predicted_labels.cpu().numpy().flatten())
             targets.extend(legal_moves_mask_batch.cpu().numpy().flatten())
         accuracy = correct / total

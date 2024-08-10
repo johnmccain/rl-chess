@@ -1,22 +1,29 @@
-import random
 import logging
+import random
 
 import chess
 import torch
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
-from rl_chess.modeling.chess_transformer import ChessTransformer
 from rl_chess.modeling.chess_cnn import ChessCNN
-from rl_chess.modeling.utils import board_to_tensor, get_legal_moves_mask, index_to_move, calculate_reward
+from rl_chess.modeling.chess_transformer import ChessTransformer
+from rl_chess.modeling.utils import (
+    board_to_tensor,
+    calculate_reward,
+    get_legal_moves_mask,
+    index_to_move,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class ChessAgent:
-    def __init__(self, app_config: AppConfig = AppConfig(), device: str = "cpu") -> None:
-        self.model: ChessTransformer | ChessCNN = self.load_cnn_model(app_config)
+    def __init__(
+        self, app_config: AppConfig = AppConfig(), device: str = "cpu"
+    ) -> None:
         self.device = torch.device(device)
+        self.model: ChessTransformer | ChessCNN = self.load_cnn_model(app_config)
         self.model.to(self.device)
 
     def load_model(self, app_config: AppConfig = AppConfig()) -> ChessTransformer:
@@ -39,7 +46,8 @@ class ChessAgent:
         )
         model.load_state_dict(
             torch.load(
-                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME
+                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME,
+                map_location=self.device,
             )
         )
         model.eval()
@@ -53,13 +61,17 @@ class ChessAgent:
 
         :returns: The trained ChessCNN model.
         """
-        model = ChessCNN(num_filters=app_config.MODEL_NUM_FILTERS, num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS)
+        model = ChessCNN(
+            num_filters=app_config.MODEL_NUM_FILTERS,
+            num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS,
+        )
         logger.info(
             f"Loading model from {base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME}"
         )
         model.load_state_dict(
             torch.load(
-                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME
+                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME,
+                map_location=self.device,
             )
         )
         model.eval()
@@ -120,8 +132,13 @@ class ChessAgent:
         legal_moves_mask = get_legal_moves_mask(board).to(self.device)
         masked_q_values = q_values.masked_fill(legal_moves_mask == 0, -1e10)
         topk = torch.topk(masked_q_values, k)
-        topk_indices, topk_values = topk.indices.cpu().numpy(), topk.values.cpu().numpy()
-        topk_indices = [index for index, value in zip(topk_indices, topk_values) if value > -1e6]
+        topk_indices, topk_values = (
+            topk.indices.cpu().numpy(),
+            topk.values.cpu().numpy(),
+        )
+        topk_indices = [
+            index for index, value in zip(topk_indices, topk_values) if value > -1e6
+        ]
         topk_values = torch.tensor([value for value in topk_values if value > -1e6])
         topk_moves = [index_to_move(index, board) for index in topk_indices]
 
@@ -164,13 +181,19 @@ class ChessAgent:
 
 
 class MinimaxAgent:
-
     def __init__(self, depth: int = 3):
         self.depth = depth
         self.max_memo = {}
         self.min_memo = {}
 
-    def alpha_beta_search(self, board: chess.Board, depth: int, alpha: float = float('-inf'), beta: float = float('inf'), maximizing_player: bool = True) -> tuple[chess.Move, float]:
+    def alpha_beta_search(
+        self,
+        board: chess.Board,
+        depth: int,
+        alpha: float = float("-inf"),
+        beta: float = float("inf"),
+        maximizing_player: bool = True,
+    ) -> tuple[chess.Move, float]:
         if maximizing_player and board.fen() in self.max_memo:
             return self.max_memo[board.fen()]
         if not maximizing_player and board.fen() in self.min_memo:
@@ -181,7 +204,7 @@ class MinimaxAgent:
         best_move = None
         best_moves = []
         if maximizing_player:
-            max_eval = float('-inf')
+            max_eval = float("-inf")
             for move in board.legal_moves:
                 board.push(move)
                 _, eval = self.alpha_beta_search(board, depth - 1, alpha, beta, False)
@@ -202,7 +225,7 @@ class MinimaxAgent:
             self.max_memo[board.fen()] = (best_move, max_eval)
             return best_move, max_eval
         else:
-            min_eval = float('inf')
+            min_eval = float("inf")
             for move in board.legal_moves:
                 board.push(move)
                 _, eval = self.alpha_beta_search(board, depth - 1, alpha, beta, True)

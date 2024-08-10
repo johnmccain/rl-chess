@@ -1,15 +1,15 @@
-import logging
 import collections
+import logging
 from typing import Iterable
 
-from tqdm import tqdm
 import chess
 import numpy as np
 import pandas as pd
-from stockfish import Stockfish
+from tqdm import tqdm
 
 from rl_chess.config.config import AppConfig
 from rl_chess.inference.inference import ChessAgent
+from stockfish import Stockfish
 
 logger = logging.getLogger(__name__)
 
