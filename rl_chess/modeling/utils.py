@@ -46,17 +46,17 @@ def calculate_move_quality(board: chess.Board, move: chess.Move) -> float:
     # Reward for controlling the center
     central_squares = [chess.D4, chess.E4, chess.D5, chess.E5]
     if move.to_square in central_squares:
-        score += 0.01
+        score += 0.005
 
     # Reward for developing pieces in the opening
     if board.fullmove_number <= 10:
         if board.piece_type_at(move.from_square) in [chess.KNIGHT, chess.BISHOP]:
-            score += 0.01
+            score += 0.005
 
     # Penalize moving the same piece multiple times in the opening
     if board.fullmove_number <= 10:
         if board.move_stack and move.from_square == board.move_stack[-1].to_square:
-            score -= 0.01
+            score -= 0.005
 
     return score
 
