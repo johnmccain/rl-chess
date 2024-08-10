@@ -2,7 +2,7 @@
 TENSORBOARD_DIR = "tensorboard"
 OUTPUT_DIR = "out"
 SAVE_STEPS = 2000
-EVAL_STEPS = 500
+EVAL_STEPS = 2000
 MOVE_EVAL_DATASET = "fen_validation_dataset.csv"
 
 # MODEL_NAME = "model_20240728-182541_final.pt"
@@ -36,4 +36,5 @@ RESIDUAL_BLOCKS = 12
 # PATH = "/Users/johnmccain/Documents/repos/rl-chess/stockfish/stockfish-macos-m1-apple-silicon"
 PATH = "C:/Users/John/Documents/repos/rl-chess/stockfish/stockfish-windows-x86-64-avx2.exe"
 PROB = 0.15
-DEPTH = 10
+DEPTH = 6
+BLUNDER_THRESHOLD = 100 # centipawns

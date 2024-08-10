@@ -51,3 +51,4 @@ class AppConfig(BaseModel):
     STOCKFISH_PATH: str = config["stockfish.path"]
     STOCKFISH_PROB: float = config["stockfish.prob"]
     STOCKFISH_DEPTH: int = config["stockfish.depth"]
+    STOCKFISH_BLUNDER_THRESHOLD: int = config["stockfish.blunder_threshold"]

@@ -21,6 +21,7 @@ class StockfishEvaluator:
     ):
         logger.info(f"Loading Stockfish from {app_config.STOCKFISH_PATH}")
         self.stockfish = Stockfish(app_config.STOCKFISH_PATH)
+        self.set_depth(app_config.STOCKFISH_DEPTH)
 
     def set_elo_rating(self, elo: int):
         self.stockfish.set_elo_rating(elo)
