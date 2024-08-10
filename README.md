@@ -77,7 +77,7 @@ The training uses off-policy learning with an experience replay buffer. The mode
 
 Experiences are stored including the board state $s$, the reward $r$, the next board state $s'$, legal move masks for both current and next state $l_n$, $l'$, and flags for completed games with no further legal moves $d_n$ $d'$. The experience replay buffer is randomly sampled during the learning phases (prioritized experience replay is on the list of things to try). The experience replay buffer has a capped size that ejects the least recently observed moves.
 
-Actions are selected using an $\epsilon$-greedy strategy. A decaying value $\epsilon \in [0, 1]$ controls the likelihood of selecting a random move for exploration vs selecting the top rated move based on `\hat{Q}`. Random move selection uses weighted random sampling, so `\hat{Q}` still has impact on those move selections. Epsilon exponentially decays from a high initial value to a minimum based on a decay hyperparameter.
+Actions are selected using an $\epsilon$-greedy strategy. A decaying value $\epsilon \in [0, 1]$ controls the likelihood of selecting a random move for exploration vs selecting the top rated move based on $\hat{Q}$. Random move selection uses weighted random sampling, so $\hat{Q}$ still has impact on those move selections. Epsilon exponentially decays from a high initial value to a minimum based on a decay hyperparameter.
 
 Rewards are calculated using a fairly simple calculation that includes a material score using conventional piece values normalized by the total material on the board in addition to a bias towards controlling the center board. Checkmates are rewarded with $\pm1$ and stalemates have a reward of $0$.
 
