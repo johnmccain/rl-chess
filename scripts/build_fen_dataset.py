@@ -94,11 +94,14 @@ def main(args: argparse.Namespace):
     progress = tqdm(total=args.n_games)
 
     with open(args.pgn_path, "r") as f:
+        # Skip games at the beginning of the PGN file (useful if generating a train + test split)
+        for _ in range(args.skip_n_games):
+            try:
+                game = chess.pgn.read_game(f)
+            except:
+                pass
         for _ in range(args.n_games):
             try:
-                # Skip games at the beginning of the PGN file (useful if generating a train + test split)
-                for _ in range(args.skip_n_games):
-                    game = chess.pgn.read_game(f)
 
                 game = chess.pgn.read_game(f)
                 if game.errors:
