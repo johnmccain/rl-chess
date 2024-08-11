@@ -222,6 +222,8 @@ class CNNTrainer:
                     [board_to_tensor(board, board.turn) for board in boards], dim=0
                 ).to(self.device)
 
+                turns = [board.turn for board in boards]
+
                 ### Calculate Player move ###
 
                 logger.debug("START Predicting Q values")
@@ -401,6 +403,7 @@ class CNNTrainer:
                     target_q_value,
                     pred_q,
                     max_next_q,
+                    turn,
                 ) in zip(
                     current_states,
                     legal_moves_mask,
@@ -414,6 +417,7 @@ class CNNTrainer:
                     target_q_value,
                     predicted_q_values,
                     max_next_q_values,
+                    turns,
                 ):
                     experience_buffer.append(
                         ExperienceRecord(
@@ -428,6 +432,7 @@ class CNNTrainer:
                             opp_done=bool(opp_done),
                             pred_q_values=pred_q,
                             max_next_q=max_next_q.item(),
+                            color=turn,
                         )
                     )
                 logger.debug("END Creating ExperienceRecord")
