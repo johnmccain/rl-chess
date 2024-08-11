@@ -3,6 +3,7 @@ import logging
 import random
 from dataclasses import dataclass, field
 
+import chess
 import torch
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class ExperienceRecord:
     opp_done: bool = field(compare=False)
     pred_q_values: torch.Tensor | None = field(default=None, compare=False)
     max_next_q: float | None = field(default=None, compare=False)
+    color: chess.Color | None = None
 
     def make_serializeable(self) -> dict:
         """
@@ -35,12 +37,14 @@ class ExperienceRecord:
             "next_state": self.next_state.cpu().numpy(),
             "next_legal_moves_mask": self.next_legal_moves_mask.cpu().numpy(),
             "done": self.done,
+            "opp_done": self.opp_done,
             "pred_q_values": (
                 self.pred_q_values.cpu().numpy()
                 if self.pred_q_values is not None
                 else None
             ),
             "max_next_q": self.max_next_q,
+            "color": self.color,
         }
 
     @classmethod
@@ -57,12 +61,14 @@ class ExperienceRecord:
             next_state=torch.tensor(serialized["next_state"]),
             next_legal_moves_mask=torch.tensor(serialized["next_legal_moves_mask"]),
             done=serialized["done"],
+            opp_done=serialized["opp_done"],
             pred_q_values=(
                 torch.tensor(serialized["pred_q_values"])
                 if serialized["pred_q_values"] is not None
                 else None
             ),
             max_next_q=serialized["max_next_q"],
+            color=serialized["color"],
         )
 
 

@@ -193,3 +193,12 @@ def index_to_move(index: int, board: chess.Board) -> chess.Move | None:
     else:
         logger.warning(f"Move {move} is not legal!")
         return None  # Returning None if the move is not legal
+
+
+def move_to_index(move: chess.Move) -> int:
+    """
+    Convert a chess move into a flat index.
+
+    :param move: The chess move to convert.
+    """
+    return move.from_square * 64 + move.to_square
