@@ -165,9 +165,6 @@ class CNNTrainer:
         if torch.cuda.is_available():
             logger.info("CUDA available, using GPU")
             device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            logger.info("MPS available, using MPS")
-            device = torch.device("mps")
         else:
             logger.info("CUDA unavailable, using CPU")
             device = torch.device("cpu")
@@ -516,7 +513,9 @@ class CNNTrainer:
 
         return total_q_loss, total_aux_loss
 
-    def eval_model_aux(self, model: ChessCNN, steps: int, batch_size: int, step: int) -> float:
+    def eval_model_aux(
+        self, model: ChessCNN, steps: int, batch_size: int, step: int
+    ) -> float:
         """
         Evaluate the model on the aux task (move legality).
         """
@@ -563,10 +562,14 @@ class CNNTrainer:
 
         model.eval()
         with torch.no_grad():
-            for fen, board_type in tqdm(zip(df["fen"], df["type"]), total=len(df), desc="Evaluating"):
+            for fen, board_type in tqdm(
+                zip(df["fen"], df["type"]), total=len(df), desc="Evaluating"
+            ):
                 board = chess.Board(fen)
                 state = board_to_tensor(board, board.turn).unsqueeze(0).to(self.device)
-                legal_moves_mask = get_legal_moves_mask(board).unsqueeze(0).to(self.device)
+                legal_moves_mask = (
+                    get_legal_moves_mask(board).unsqueeze(0).to(self.device)
+                )
 
                 # Model predictions
                 q_values, _ = model(state)
@@ -610,7 +613,9 @@ class CNNTrainer:
         # Log to TensorBoard
         for board_type, kpi_dict in kpis_by_type.items():
             for kpi, value in kpi_dict.items():
-                self.writer.add_scalar(f"Validation/{board_type}/{kpi}/Step", value, step)
+                self.writer.add_scalar(
+                    f"Validation/{board_type}/{kpi}/Step", value, step
+                )
 
         for kpi, value in overall_kpis.items():
             self.writer.add_scalar(f"Validation/{kpi}/Step", value, step)
@@ -867,9 +872,13 @@ if __name__ == "__main__":
         if model_filename is None:
             raise FileNotFoundError("No model files found to resume training from")
         logger.info(f"Resuming training from {model_filename}")
-        model, optimizer, start_episode, hparams, model_timestamp = (
-            load_from_checkpoint(model_filename, device)
-        )
+        (
+            model,
+            optimizer,
+            start_episode,
+            hparams,
+            model_timestamp,
+        ) = load_from_checkpoint(model_filename, device)
         # Ovewrite the app config with the latest values
         app_config = AppConfig(**hparams)
         # approximate start step based on learn steps, explore steps, and episode number
