@@ -714,7 +714,12 @@ class CNNTrainer:
             ),
             app_config.MODEL_MIN_EPSILON,
         )
-        self.fill_experience_buffer(model, epsilon, gamma, app_config)
+        # self.fill_experience_buffer(model, epsilon, gamma, app_config)
+        with open("buf.pkl", "rb") as f:
+            buf = pickle.load(f)
+            self.experience_buffer.buffer = [
+                ExperienceRecord.from_serialized(exp) for exp in buf
+            ]
 
         while episode < episodes:
             gamma = min(
@@ -723,14 +728,14 @@ class CNNTrainer:
                 app_config.MODEL_GAMMA,
             )
 
-            new_experiences = self.explore(
-                model,
-                app_config.MODEL_EXPLORE_EPISODES,
-                gamma,
-                epsilon,
-                app_config.MODEL_BATCH_SIZE,
-            )
-            self.experience_buffer.extend(new_experiences)
+            # new_experiences = self.explore(
+            #     model,
+            #     app_config.MODEL_EXPLORE_EPISODES,
+            #     gamma,
+            #     epsilon,
+            #     app_config.MODEL_BATCH_SIZE,
+            # )
+            # self.experience_buffer.extend(new_experiences)
             episode += app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
 
             total_q_loss, total_aux_loss = self.learn(
