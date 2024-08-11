@@ -26,10 +26,14 @@ numpy = "<2"
 torch-optimizer = "^0.3.0"
 pygame-widgets = "^1.1.5"
 stockfish = "^3.28.0"
-torch = {version = "^2.4.0+cu118", source = "pytorch-gpu-src"}
 tqdm = "^4.66.5"
 scikit-learn = "^1.5.1"
 pandas = "^2.2.2"
+torch = [
+    {version = "2.3.1", platform = "darwin"},  # 2.3.1 because poetry doesn't respect platform for some reason...
+    {version = "^2.4.0+cu118", platform = "linux", source = "pytorch-gpu-src"},
+    {version = "^2.4.0+cu118", platform="win32", source = "pytorch-gpu-src"},
+]
 
 
 [tool.poetry.group.dev.dependencies]
