@@ -4,7 +4,14 @@ import torch.nn.functional as F
 
 
 class ChessCNN(nn.Module):
-    def __init__(self, num_filters=256, num_residual_blocks=10, negative_slope=0.01):
+
+    def __init__(
+        self,
+        num_filters: int = 256,
+        num_residual_blocks: int = 10,
+        negative_slope: float = 0.01,
+        dropout: float = 0.1,
+    ):
         super(ChessCNN, self).__init__()
 
         self.negative_slope = negative_slope
@@ -52,6 +59,8 @@ class ChessCNN(nn.Module):
         )
         self.auxiliary_fc = nn.Linear(2 * 64, 4096)
 
+        self.dropout = nn.Dropout(p=dropout)
+
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # x shape: (batch_size, 64)
         x = self.preprocess_input(x)  # shape: (batch_size, 12, 8, 8)
@@ -60,13 +69,16 @@ class ChessCNN(nn.Module):
 
         for block in self.residual_blocks:
             x = block(x)
+            x = self.dropout(x)
 
         policy = self.policy_conv(x)
         policy = policy.view(policy.size(0), -1)
+        policy = self.dropout(policy)
         q_values = self.policy_fc(policy)
 
         auxiliary = self.auxiliary_conv(x)
         auxiliary = auxiliary.view(auxiliary.size(0), -1)
+        auxiliary = self.dropout(auxiliary)
         auxiliary_logits = self.auxiliary_fc(auxiliary)
 
         return q_values, auxiliary_logits
@@ -74,7 +86,7 @@ class ChessCNN(nn.Module):
     def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
         # x shape: (batch_size, 64)
         batch_size = x.size(0)
-        x = x.long()  # Ensure input is long tensor
+        x = x.long()
 
         # Create one-hot encoded tensor
         one_hot = torch.zeros(batch_size, 13, 64, device=x.device)
@@ -83,7 +95,7 @@ class ChessCNN(nn.Module):
         # Reshape to 8x8 board
         one_hot = one_hot.view(batch_size, 13, 8, 8)
 
-        # Remove the empty square channel (assuming 0 represents empty)
+        # Remove the empty square channel (not necessary for CNN)
         return one_hot[:, 1:, :, :]
 
 
