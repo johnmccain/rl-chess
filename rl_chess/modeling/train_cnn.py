@@ -1,5 +1,6 @@
 import argparse
 import datetime
+import copy
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from collections import defaultdict
 import chess
 import pandas as pd
 import torch
+from torch import nn
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import precision_score, recall_score
@@ -20,7 +22,9 @@ from tqdm import tqdm
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
 from rl_chess.evaluation.stockfish_evaluator import StockfishEvaluator
-from rl_chess.modeling.chess_cnn import ChessCNN  # Import the new ChessCNN model
+from rl_chess.modeling.chess_cnn import ChessCNN
+from rl_chess.modeling.chess_transformer import ChessTransformer
+from rl_chess.modeling.chess_ensemble import EnsembleCNNTransformer
 from rl_chess.modeling.experience_buffer import ExperienceBuffer, ExperienceRecord
 from rl_chess.modeling.utils import (
     board_to_tensor,
@@ -34,13 +38,13 @@ app_config = AppConfig()
 logging.basicConfig(
     level=app_config.LOG_LEVEL,
     format="[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("train_cnn.log")],
+    handlers=[logging.StreamHandler(), logging.FileHandler("train_deepq.log")],
 )
 
 logger = logging.getLogger(__name__)
 
 
-class CNNTrainer:
+class DeepQTrainer:
     def __init__(
         self,
         device: str | None = None,
@@ -92,7 +96,7 @@ class CNNTrainer:
             pickle.dump(saveable_experience_buffer, f)
 
     def save_checkpoint(
-        self, model: ChessCNN, optimizer: optim.Optimizer, episode: int
+        self, model: nn.Module, optimizer: optim.Optimizer, episode: int
     ) -> None:
         logger.info(f"Saving checkpoint for episode {episode}")
 
@@ -131,10 +135,23 @@ class CNNTrainer:
                 os.remove(file)
                 logger.info(f"Deleted old checkpoint file: {file}")
 
-    def save_hparams(self, model: ChessCNN, app_config: AppConfig) -> None:
+    def save_hparams(self, model: nn.Module, app_config: AppConfig) -> None:
         hparams = {
-            "MODEL_NUM_FILTERS": app_config.MODEL_CNN_NUM_FILTERS,
-            "MODEL_RESIDUAL_BLOCKS": app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+            "MODEL_CLASS": model.__class__.__name__,
+
+            "MODEL_CNN_NUM_FILTERS": app_config.MODEL_CNN_NUM_FILTERS,
+            "MODEL_CNN_RESIDUAL_BLOCKS": app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+            "MODEL_CNN_NEGATIVE_SLOPE": app_config.MODEL_CNN_NEGATIVE_SLOPE,
+            "MODEL_CNN_DROPOUT": app_config.MODEL_CNN_DROPOUT,
+
+            "MODEL_TRANSFORMER_NUM_HEADS": app_config.MODEL_TRANSFORMER_NUM_HEADS,
+            "MODEL_TRANSFORMER_NUM_LAYERS": app_config.MODEL_TRANSFORMER_NUM_LAYERS,
+            "MODEL_TRANSFORMER_D_MODEL": app_config.MODEL_TRANSFORMER_D_MODEL,
+            "MODEL_TRANSFORMER_DIM_FEEDFORWARD": app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
+            "MODEL_TRANSFORMER_DROPOUT": app_config.MODEL_TRANSFORMER_DROPOUT,
+            "MODEL_TRANSFORMER_FREEZE_POS": app_config.MODEL_TRANSFORMER_FREEZE_POS,
+            "MODEL_TRANSFORMER_ADD_GLOBAL": app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
+
             "MODEL_GAMMA": app_config.MODEL_GAMMA,
             "MODEL_INITIAL_GAMMA": app_config.MODEL_INITIAL_GAMMA,
             "MODEL_GAMMA_RAMP_STEPS": app_config.MODEL_GAMMA_RAMP_STEPS,
@@ -198,7 +215,7 @@ class CNNTrainer:
 
     def explore(
         self,
-        model: ChessCNN,
+        model: nn.Module,
         episodes: int,
         gamma: float,
         epsilon: float,
@@ -443,8 +460,8 @@ class CNNTrainer:
 
     def learn(
         self,
-        model: ChessCNN,
-        target_model: ChessCNN,
+        model: nn.Module,
+        target_model: nn.Module,
         optimizer: optim.Optimizer,
         q_loss_fn: torch.nn.Module,
         aux_loss_fn: torch.nn.Module,
@@ -519,7 +536,7 @@ class CNNTrainer:
         return total_q_loss, total_aux_loss
 
     def eval_model_aux(
-        self, model: ChessCNN, steps: int, batch_size: int, step: int
+        self, model: nn.Module, steps: int, batch_size: int, step: int
     ) -> float:
         """
         Evaluate the model on the aux task (move legality).
@@ -554,7 +571,7 @@ class CNNTrainer:
         self.writer.add_scalar("Validation/AuxLoss/Step", aux_val_loss, step)
         return aux_val_loss
 
-    def eval_model_sf(self, model: ChessCNN, step: int, app_config: AppConfig) -> dict:
+    def eval_model_sf(self, model: nn.Module, step: int, app_config: AppConfig) -> dict:
         """
         Evaluate the model using a CSV of FEN states and types based on Stockfish evaluations.
         Calculates KPIs overall and by game state type.
@@ -628,7 +645,7 @@ class CNNTrainer:
         return {"overall": overall_kpis, "by_type": dict(kpis_by_type)}
 
     def fill_experience_buffer(
-        self, model: ChessCNN, epsilon: float, gamma: float, app_config: AppConfig
+        self, model: nn.Module, epsilon: float, gamma: float, app_config: AppConfig
     ):
         logger.info("Filling experience buffer")
         # Fill the experience buffer
@@ -659,17 +676,15 @@ class CNNTrainer:
 
     def train_deep_q_network_off_policy(
         self,
-        model: ChessCNN,
+        model: nn.Module,
         optimizer: optim.Optimizer,
         episodes: int,
         app_config: AppConfig = AppConfig(),
         start_episode: int = 0,
         start_step: int = 0,
-    ) -> ChessCNN:
+    ) -> nn.Module:
         model.to(self.device)
-        target_model = ChessCNN(
-            num_filters=model.num_filters, num_residual_blocks=model.num_residual_blocks
-        ).to(self.device)
+        target_model = copy.deepcopy(model).to(self.device)
         target_model.load_state_dict(model.state_dict())
         target_model.eval()
 
@@ -823,7 +838,7 @@ def find_latest_model_filename(model_timestamp: str | None = None) -> str:
 def load_from_checkpoint(
     model_filename: str,
     device: torch.device,
-) -> tuple[ChessCNN, optim.Optimizer, int, dict, str]:
+) -> tuple[nn.Module, optim.Optimizer, int, dict, str]:
     # First find the model timestamp from the filename
     model_timestamp = model_filename.split("_e")[0].split("_")[-1]
     # Load hparams from the hparams file
@@ -832,11 +847,45 @@ def load_from_checkpoint(
     ) as f:
         hparams = json.load(f)
 
-    # Load the model and optimizer
-    model = ChessCNN(
-        num_filters=hparams["MODEL_NUM_FILTERS"],
-        num_residual_blocks=hparams["MODEL_RESIDUAL_BLOCKS"],
-    ).to(device)
+    checkpoint_model_class = hparams["MODEL_CLASS"]
+
+    if checkpoint_model_class == "ChessCNN":
+        # Load the model and optimizer
+        model = ChessCNN(
+            num_filters=hparams["MODEL_CNN_NUM_FILTERS"],
+            num_residual_blocks=hparams["MODEL_CNN_RESIDUAL_BLOCKS"],
+            negative_slope=hparams["MODEL_CNN_NEGATIVE_SLOPE"],
+            dropout=hparams["MODEL_CNN_DROPOUT"],
+        ).to(device)
+    elif checkpoint_model_class == "ChessTransformer":
+        model = ChessTransformer(
+            d_model=hparams["MODEL_TRANSFORMER_D_MODEL"],
+            nhead=hparams["MODEL_TRANSFORMER_NUM_HEADS"],
+            num_layers=hparams["MODEL_TRANSFORMER_NUM_LAYERS"],
+            dim_feedforward=hparams["MODEL_TRANSFORMER_DIM_FEEDFORWARD"],
+            dropout=hparams["MODEL_TRANSFORMER_DROPOUT"],
+            freeze_pos=hparams["MODEL_TRANSFORMER_FREEZE_POS"],
+            add_global=hparams["MODEL_TRANSFORMER_ADD_GLOBAL"],
+        ).to(device)
+    elif checkpoint_model_class == "EnsembleCNNTransformer":
+        model = EnsembleCNNTransformer(
+            cnn=ChessCNN(
+                num_filters=hparams["MODEL_CNN_NUM_FILTERS"],
+                num_residual_blocks=hparams["MODEL_CNN_RESIDUAL_BLOCKS"],
+                negative_slope=hparams["MODEL_CNN_NEGATIVE_SLOPE"],
+                dropout=hparams["MODEL_CNN_DROPOUT"],
+            ),
+            transformer=ChessTransformer(
+                d_model=hparams["MODEL_TRANSFORMER_D_MODEL"],
+                nhead=hparams["MODEL_TRANSFORMER_NUM_HEADS"],
+                num_layers=hparams["MODEL_TRANSFORMER_NUM_LAYERS"],
+                dim_feedforward=hparams["MODEL_TRANSFORMER_DIM_FEEDFORWARD"],
+                dropout=hparams["MODEL_TRANSFORMER_DROPOUT"],
+                freeze_pos=hparams["MODEL_TRANSFORMER_FREEZE_POS"],
+                add_global=hparams["MODEL_TRANSFORMER_ADD_GLOBAL"],
+            ),
+        ).to(device)
+
     model.load_state_dict(torch.load(model_filename))
 
     optimizer = optim.AdamW(model.parameters(), lr=hparams["MODEL_LR"])
@@ -844,6 +893,46 @@ def load_from_checkpoint(
 
     episode = int(model_filename.split("_e")[-1].split(".")[0])
     return model, optimizer, episode, hparams, model_timestamp
+
+
+def create_model(model_class: str, app_config: AppConfig, device: torch.device) -> nn.Module:
+    if model_class == "ChessCNN":
+        # Load the model and optimizer
+        model = ChessCNN(
+            num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+            num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+            negative_slope=app_config.MODEL_CNN_NEGATIVE_SLOPE,
+            dropout=app_config.MODEL_CNN_DROPOUT,
+        ).to(device)
+    elif model_class == "ChessTransformer":
+        model = ChessTransformer(
+            d_model=app_config.MODEL_TRANSFORMER_D_MODEL,
+            nhead=app_config.MODEL_TRANSFORMER_NUM_HEADS,
+            num_layers=app_config.MODEL_TRANSFORMER_NUM_LAYERS,
+            dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
+            dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
+            freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
+            add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
+        ).to(device)
+    elif model_class == "EnsembleCNNTransformer":
+        model = EnsembleCNNTransformer(
+            cnn=ChessCNN(
+                num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+                num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+                negative_slope=app_config.MODEL_CNN_NEGATIVE_SLOPE,
+                dropout=app_config.MODEL_CNN_DROPOUT,
+            ),
+            transformer=ChessTransformer(
+                d_model=app_config.MODEL_TRANSFORMER_D_MODEL,
+                nhead=app_config.MODEL_TRANSFORMER_NUM_HEADS,
+                num_layers=app_config.MODEL_TRANSFORMER_NUM_LAYERS,
+                dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
+                dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
+                freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
+                add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
+            ),
+        ).to(device)
+    return model
 
 
 if __name__ == "__main__":
@@ -871,7 +960,7 @@ if __name__ == "__main__":
 
     args = argparser.parse_args()
 
-    device = CNNTrainer.select_device()
+    device = DeepQTrainer.select_device()
     if args.resume:
         model_filename = find_latest_model_filename(args.timestamp)
         if model_filename is None:
@@ -893,16 +982,13 @@ if __name__ == "__main__":
         ) * app_config.MODEL_LEARN_STEPS
     else:
         app_config = AppConfig()
-        model = ChessCNN(
-            num_filters=app_config.MODEL_CNN_NUM_FILTERS,
-            num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
-        ).to(device)
+        model = create_model("EnsembleCNNTransformer", app_config, device)
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
         model_timestamp = None
         start_episode = 0
         start_step = 0
 
-    trainer = CNNTrainer(app_config=app_config, model_timestamp=model_timestamp)
+    trainer = DeepQTrainer(app_config=app_config, model_timestamp=model_timestamp)
     trainer.train_deep_q_network_off_policy(
         model,
         optimizer,
