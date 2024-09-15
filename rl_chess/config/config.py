@@ -45,8 +45,19 @@ class AppConfig(BaseModel):
     MODEL_EXPLORE_EPISODES: int = config["model.explore_episodes"]
     MODEL_LEARN_STEPS: int = config["model.learn_steps"]
     MODEL_TARGET_UPDATE_FREQ: int = config["model.target_update_freq"]
-    MODEL_NUM_FILTERS: int = config["model.num_filters"]
-    MODEL_RESIDUAL_BLOCKS: int = config["model.residual_blocks"]
+
+    MODEL_CNN_NUM_FILTERS: int = config["model.cnn.num_filters"]
+    MODEL_CNN_RESIDUAL_BLOCKS: int = config["model.cnn.residual_blocks"]
+    MODEL_CNN_NEGATIVE_SLOPE: float = config["model.cnn.negative_slope"]
+    MODEL_CNN_DROPOUT: float = config["model.cnn.dropout"]
+
+    MODEL_TRANSFORMER_NUM_HEADS: int = config["model.transformer.num_heads"]
+    MODEL_TRANSFORMER_NUM_LAYERS: int = config["model.transformer.num_layers"]
+    MODEL_TRANSFORMER_D_MODEL: int = config["model.transformer.d_model"]
+    MODEL_TRANSFORMER_DIM_FEEDFORWARD: int = config["model.transformer.dim_feedforward"]
+    MODEL_TRANSFORMER_DROPOUT: float = config["model.transformer.dropout"]
+    MODEL_TRANSFORMER_FREEZE_POS: bool = config["model.transformer.freeze_pos"]
+    MODEL_TRANSFORMER_ADD_GLOBAL: bool = config["model.transformer.add_global"]
 
     STOCKFISH_PATH: str = config["stockfish.path"]
     STOCKFISH_PROB: float = config["stockfish.prob"]

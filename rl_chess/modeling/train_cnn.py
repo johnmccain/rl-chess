@@ -133,8 +133,8 @@ class CNNTrainer:
 
     def save_hparams(self, model: ChessCNN, app_config: AppConfig) -> None:
         hparams = {
-            "MODEL_NUM_FILTERS": app_config.MODEL_NUM_FILTERS,
-            "MODEL_RESIDUAL_BLOCKS": app_config.MODEL_RESIDUAL_BLOCKS,
+            "MODEL_NUM_FILTERS": app_config.MODEL_CNN_NUM_FILTERS,
+            "MODEL_RESIDUAL_BLOCKS": app_config.MODEL_CNN_RESIDUAL_BLOCKS,
             "MODEL_GAMMA": app_config.MODEL_GAMMA,
             "MODEL_INITIAL_GAMMA": app_config.MODEL_INITIAL_GAMMA,
             "MODEL_GAMMA_RAMP_STEPS": app_config.MODEL_GAMMA_RAMP_STEPS,
@@ -894,8 +894,8 @@ if __name__ == "__main__":
     else:
         app_config = AppConfig()
         model = ChessCNN(
-            num_filters=app_config.MODEL_NUM_FILTERS,
-            num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS,
+            num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+            num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
         ).to(device)
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
         model_timestamp = None

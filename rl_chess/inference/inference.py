@@ -62,8 +62,8 @@ class ChessAgent:
         :returns: The trained ChessCNN model.
         """
         model = ChessCNN(
-            num_filters=app_config.MODEL_NUM_FILTERS,
-            num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS,
+            num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+            num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
         )
         logger.info(
             f"Loading model from {base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME}"
