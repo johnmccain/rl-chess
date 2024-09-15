@@ -9,6 +9,43 @@ import torch
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class FullEvaluationRecord:
+    fen: str
+    state: torch.Tensor
+    legal_moves_mask: torch.Tensor
+    rewards: torch.Tensor
+    done: bool
+    color: chess.Color | None = None
+
+    def make_serializeable(self) -> dict:
+        """
+        Make efficiently serializable by converting tensors to numpy arrays and converting to dictionary.
+        """
+        return {
+            "fen": self.fen,
+            "state": self.state.cpu().numpy(),
+            "legal_moves_mask": self.legal_moves_mask.cpu().numpy(),  # (4096,) tensor
+            "rewards": self.rewards.cpu().numpy(),  # (4096,) tensor
+            "done": self.done,
+            "color": self.color,
+        }
+
+    @classmethod
+    def from_serialized(cls, serialized: dict) -> "FullEvaluationRecord":
+        """
+        Load a serialized FullEvaluationRecord from a dictionary by converting numpy arrays back to tensors.
+        """
+        return cls(
+            fen=serialized["fen"],
+            state=torch.tensor(serialized["state"]),
+            legal_moves_mask=torch.tensor(serialized["legal_moves_mask"]),
+            rewards=torch.tensor(serialized["rewards"]),
+            done=serialized["done"],
+            color=serialized["color"],
+        )
+
+
 @dataclass(order=True)
 class ExperienceRecord:
     q_diff: float
