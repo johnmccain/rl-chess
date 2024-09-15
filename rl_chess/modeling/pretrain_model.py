@@ -13,6 +13,7 @@ from rl_chess import base_path
 from rl_chess.modeling.chess_cnn import ChessCNN
 from rl_chess.modeling.chess_transformer import ChessTransformer
 from rl_chess.modeling.chess_cnn_transformer import ChessCNNTransformer
+from rl_chess.modeling.chess_ensemble import EnsembleCNNTransformer
 from rl_chess.modeling.experience_buffer import FullEvaluationRecord
 from rl_chess.config.config import AppConfig
 
@@ -117,19 +118,12 @@ def pretrain_model(
     return model, q_losses, aux_losses
 
 
-def debug_log_model():
-    pass
-
-
 if __name__ == "__main__":
     app_config = AppConfig()
-    model = ChessCNN(
-        num_filters=128,
-        num_residual_blocks=4,
-    )
     # model = ChessCNN(
-    #     num_filters=app_config.MODEL_NUM_FILTERS,
-    #     num_residual_blocks=app_config.MODEL_RESIDUAL_BLOCKS,
+    #     num_filters=128,
+    #     num_residual_blocks=4,
+    #     negative_slope=0.0
     # )
     # model = ChessTransformer(
     #     d_model=128,
@@ -149,11 +143,25 @@ if __name__ == "__main__":
     #     dim_feedforward=512,
     #     dropout=0.0,
     # )
+    model = EnsembleCNNTransformer(
+        cnn=ChessCNN(num_filters=128, num_residual_blocks=4, negative_slope=0.0),
+        transformer=ChessTransformer(
+            d_model=128,
+            nhead=4,
+            num_layers=4,
+            dim_feedforward=512,
+            dropout=0.0,
+            freeze_pos=False,
+            add_global=False,
+        ),
+    )
     pretrained_model, q_losses, aux_losses = pretrain_model(
         model,
         num_epochs=50,
         learning_rate=1e-4,
     )
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    with open(base_path / "out" / f"pretrained_cnn_{timestamp}.pkl", "wb") as f:
+    with open(
+        base_path / "out" / f"pretrained_{model.__class__.__name__}_{timestamp}.pkl", "wb"
+    ) as f:
         pickle.dump(pretrained_model, f)
