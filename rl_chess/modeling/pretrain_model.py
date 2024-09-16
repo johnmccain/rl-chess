@@ -13,6 +13,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from sklearn.model_selection import train_test_split
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
@@ -24,9 +25,14 @@ from rl_chess.modeling.experience_buffer import FullEvaluationRecord
 
 
 class ChessDataset(Dataset):
-    def __init__(self, data_dir: str):
+    def __init__(self, data_dir: str | None = None, file_list: List[str] | None = None):
+        if not data_dir and not file_list:
+            raise ValueError("Either data_dir or file_list must be provided")
         self.data_dir = data_dir
-        self.file_list = [f for f in os.listdir(data_dir) if f.endswith(".pkl.gzip")]
+        if not file_list:
+            self.file_list = [f for f in os.listdir(data_dir) if f.endswith(".pkl.gzip")]
+        else:
+            self.file_list = file_list
         self.data = []
         self._load_data()
 
@@ -61,6 +67,43 @@ def save_hparams(hparams: dict, name: str):
         json.dump(hparams, f)
 
 
+def validate_model(
+        model: nn.Module,
+        test_loader: DataLoader,
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+) -> Tuple[float, float]:
+    model.eval()
+
+    mse_loss = nn.MSELoss(reduction="none")
+
+    q_losses = []
+    aux_losses = []
+
+    with torch.no_grad():
+        for states, legal_moves_masks, rewards in test_loader:
+            states = states.to(device)
+            legal_moves_masks = legal_moves_masks.to(device)
+            rewards = rewards.to(device)
+
+            predicted_q_values, aux_logits = model(states)
+
+            element_wise_mse = mse_loss(predicted_q_values, rewards)
+            masked_mse = element_wise_mse * legal_moves_masks
+            q_loss = (
+                masked_mse.sum() / legal_moves_masks.sum()
+            )  # Normalize by number of legal moves
+
+            aux_loss = nn.BCEWithLogitsLoss()(aux_logits, legal_moves_masks)
+
+            q_losses.append(q_loss.item())
+            aux_losses.append(aux_loss.item())
+
+    avg_q_loss = sum(q_losses) / len(q_losses)
+    avg_aux_loss = sum(aux_losses) / len(aux_losses)
+
+    return avg_q_loss, avg_aux_loss
+
+
 def pretrain_model(
     model: nn.Module,
     batch_size: int = 32,
@@ -89,8 +132,12 @@ def pretrain_model(
 
     # Create dataset and dataloader
     data_dir = base_path / "data" / "full_move_evals"
-    dataset = ChessDataset(str(data_dir))
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    files = [f for f in os.listdir(data_dir) if f.endswith(".pkl.gzip")]
+    train_files, test_files = train_test_split(files, test_size=0.1)
+    train_dataset = ChessDataset(data_dir=str(data_dir), file_list=train_files)
+    test_dataset = ChessDataset(data_dir=str(data_dir), file_list=test_files)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     # Define optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -98,7 +145,7 @@ def pretrain_model(
         optimizer,
         start_factor=1.0,
         end_factor=0.1,
-        total_iters=num_epochs * len(dataloader),
+        total_iters=num_epochs * len(train_dataloader),
     )
 
     # Training loop
@@ -113,10 +160,12 @@ def pretrain_model(
         epoch_aux_loss = 0.0
         last_q_loss = 0.0
         last_aux_loss = 0.0
+        last_log_step = step
 
         for states, legal_moves_masks, rewards in tqdm(
-            dataloader, desc=f"Epoch {epoch+1}/{num_epochs}"
+            train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}"
         ):
+            model.train()
             optimizer.zero_grad()
 
             step += 1
@@ -147,22 +196,30 @@ def pretrain_model(
             # Update epoch losses
             epoch_q_loss += q_loss.item()
             epoch_aux_loss += aux_loss.item()
-            if step % app_config.APP_EVAL_STEPS == 0:
+
+            if step % 1000 == 0:
                 writer.add_scalar(
                     "Train/Q-Loss",
-                    (epoch_q_loss - last_q_loss) / app_config.APP_EVAL_STEPS,
+                    (epoch_q_loss - last_q_loss) / (step - last_log_step),
                     step,
                 )
                 writer.add_scalar(
                     "Train/Aux-Loss",
-                    (epoch_aux_loss - last_aux_loss) / app_config.APP_EVAL_STEPS,
+                    (epoch_aux_loss - last_aux_loss) / (step - last_log_step),
                     step,
                 )
                 writer.add_scalar("LR", lr_scheduler.get_last_lr()[0], step)
+                last_q_loss = epoch_q_loss
+                last_aux_loss = epoch_aux_loss
+                last_log_step = step
+            if step % 4000 == 0:
+                test_q_loss, test_aux_loss = validate_model(model, test_dataloader, device)
+                writer.add_scalar("Validation/Q-Loss", test_q_loss, step)
+                writer.add_scalar("Validation/Aux-Loss", test_aux_loss, step)
 
         # Calculate average losses for the epoch
-        avg_q_loss = epoch_q_loss / len(dataloader)
-        avg_aux_loss = epoch_aux_loss / len(dataloader)
+        avg_q_loss = epoch_q_loss / len(train_dataloader)
+        avg_aux_loss = epoch_aux_loss / len(train_dataloader)
 
         q_losses.append(avg_q_loss)
         aux_losses.append(avg_aux_loss)
@@ -231,6 +288,7 @@ if __name__ == "__main__":
         MODEL_CNN_DROPOUT=app_config.MODEL_CNN_DROPOUT,
     )
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    save_hparams(hparams, f"{model.__class__.__name__}_{timestamp}")
     pretrained_model, q_losses, aux_losses = pretrain_model(
         model,
         num_epochs=5,
