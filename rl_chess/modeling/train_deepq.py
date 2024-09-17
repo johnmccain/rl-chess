@@ -34,6 +34,7 @@ from rl_chess.modeling.utils import (
     get_legal_moves_mask,
     index_to_move,
 )
+from rl_chess.modeling.optim import WarmupCosineAnnealingLR
 
 app_config = AppConfig()
 
@@ -793,8 +794,11 @@ class DeepQTrainer:
         t_max = episodes // (
             app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
         )  # Number of epochs
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=t_max, eta_min=1e-6
+        scheduler = WarmupCosineAnnealingLR(
+            optimizer,
+            warmup_steps=app_config.MODEL_WARMUP_STEPS,
+            total_steps=t_max,
+            min_lr=1e-6
         )
 
         use_amp = self.device.type == "cuda"

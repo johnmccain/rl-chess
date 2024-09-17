@@ -33,6 +33,7 @@ class AppConfig(BaseModel):
     MODEL_CLASS: str = config["model.class"]
 
     MODEL_LR: float = config["model.lr"]
+    MODEL_WARMUP_STEPS: int = config["model.warmup_steps"]
     MODEL_GAMMA_STARTUP_STEPS: int = config["model.gamma_startup_steps"]
     MODEL_GAMMA_RAMP_STEPS: int = config["model.gamma_ramp_steps"]
     MODEL_GAMMA: float = config["model.gamma"]

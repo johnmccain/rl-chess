@@ -7,7 +7,8 @@ MOVE_EVAL_DATASET = "fen_validation_dataset.csv"
 
 # MODEL_NAME = "model_20240728-182541_final.pt"
 # MODEL_NAME = "pretrained_EnsembleCNNTransformer_20240915172453_final.pkl"
-MODEL_NAME = "model_20240915-175633_e100032.pt"
+MODEL_NAME = "model_20240916-213526_e81920.pt"
+# MODEL_NAME = "model_20240917-050539_e53248.pt"
 
 [LOG]
 LEVEL = "INFO"
@@ -17,6 +18,7 @@ LEVEL = "INFO"
 CLASS = "EnsembleCNNTransformer"
 
 LR = 1e-4
+WARMUP_STEPS = 20000
 BATCH_SIZE = 64
 GRAD_STEPS = 8  # Unused
 CLIP_GRAD = 1.0
