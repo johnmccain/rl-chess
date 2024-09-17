@@ -8,11 +8,13 @@ import pathlib
 import pickle
 import random
 from collections import defaultdict
+import gzip
 
 import chess
 import pandas as pd
 import torch
 from torch import nn
+import torch.amp
 import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.metrics import precision_score, recall_score
@@ -45,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 
 class DeepQTrainer:
+    CURRICULUM_BUFFER_PATH = base_path / "data" / "curriculum_buffers"
+
     def __init__(
         self,
         device: str | None = None,
@@ -74,6 +78,11 @@ class DeepQTrainer:
         )
 
         self.experience_buffer = ExperienceBuffer(app_config.MODEL_BUFFER_SIZE)
+        self.buffer_file_list = [
+            f
+            for f in os.listdir(self.CURRICULUM_BUFFER_PATH)
+            if f.endswith(".pkl.gzip") or f.endswith(".pkl") or f.endswith(".pkl.gz")
+        ]
         self.app_config = app_config
 
     @staticmethod
@@ -94,6 +103,46 @@ class DeepQTrainer:
         ]
         with open(filename, "wb") as f:
             pickle.dump(saveable_experience_buffer, f)
+
+    def augment_experience_buffer(self, path: str | pathlib.Path | None = None) -> None:
+        """
+        Load an experience buffer from a file and append it to the current experience buffer.
+
+        :param path: The path to the experience buffer file. If None, a random buffer file will be selected.
+        """
+        if path is None:
+            # Use a random buffer file
+            if not self.buffer_file_list:
+                logger.warning("No buffer files available!")
+                return
+            idx = random.randint(0, len(self.buffer_file_list) - 1)
+            filename = self.buffer_file_list.pop(idx)
+            path = self.CURRICULUM_BUFFER_PATH / filename
+
+        logger.info(f"Augmenting experience buffer from {path}")
+        if str(path).endswith(".gz") or str(path).endswith(".gzip"):
+            with gzip.open(path, "rb") as f:
+                experiences = pickle.load(f)
+        else:
+            with open(path, "rb") as f:
+                experiences = pickle.load(f)
+        for exp in experiences:
+            experience_record = ExperienceRecord.from_serialized(exp)
+
+            experience_record.state = experience_record.state.to(self.device)
+            experience_record.next_state = experience_record.next_state.to(self.device)
+            experience_record.legal_moves_mask = experience_record.legal_moves_mask.to(
+                self.device
+            )
+            experience_record.next_legal_moves_mask = experience_record.next_legal_moves_mask.to(
+                self.device
+            )
+            experience_record.action = experience_record.action.to(self.device)
+            if experience_record.pred_q_values:
+                experience_record.pred_q_values = experience_record.pred_q_values.to(
+                    self.device
+                )
+            self.experience_buffer.add(experience_record)
 
     def save_checkpoint(
         self, model: nn.Module, optimizer: optim.Optimizer, episode: int
@@ -230,180 +279,182 @@ class DeepQTrainer:
             ]
             n_moves = 0
 
+            enable_amp = self.device.type == "cuda"
+
             while (
                 boards
                 and not all(board.is_game_over() for board in boards)
                 and n_moves < app_config.MODEL_MAX_MOVES
             ):
-                current_states = torch.stack(
-                    [board_to_tensor(board, board.turn) for board in boards], dim=0
-                ).to(self.device)
+                with torch.no_grad(), torch.amp.autocast("cuda", enabled=enable_amp):
+                    current_states = torch.stack(
+                        [board_to_tensor(board, board.turn) for board in boards], dim=0
+                    ).to(self.device)
 
-                turns = [board.turn for board in boards]
+                    turns = [board.turn for board in boards]
 
-                ### Calculate Player move ###
+                    ### Calculate Player move ###
 
-                logger.debug("START Predicting Q values")
-                # Predict Q-values
-                with torch.no_grad():
+                    logger.debug("START Predicting Q values")
+                    # Predict Q-values
                     predicted_q_values, _ = model(current_states)
-                logger.debug("END Predicting Q values")
+                    logger.debug("END Predicting Q values")
 
-                logger.debug("START Masking illegal moves")
-                # Mask illegal moves
-                legal_moves_mask = torch.stack(
-                    [get_legal_moves_mask(board) for board in boards], dim=0
-                ).to(self.device)
-                masked_q_values = predicted_q_values.masked_fill(
-                    legal_moves_mask == 0, -1e10
-                )
-                logger.debug("END Masking illegal moves")
+                    logger.debug("START Masking illegal moves")
+                    # Mask illegal moves
+                    legal_moves_mask = torch.stack(
+                        [get_legal_moves_mask(board) for board in boards], dim=0
+                    ).to(self.device)
+                    masked_q_values = predicted_q_values.masked_fill(
+                        legal_moves_mask == 0, torch.finfo(predicted_q_values.dtype).min
+                    )
+                    logger.debug("END Masking illegal moves")
 
-                logger.debug("START Selecting action")
-                actions = torch.stack(
-                    [
-                        self.select_action(masked_q_values[idx], epsilon, board)
+                    logger.debug("START Selecting action")
+                    actions = torch.stack(
+                        [
+                            self.select_action(masked_q_values[idx], epsilon, board)
+                            for idx, board in enumerate(boards)
+                        ],
+                        dim=0,
+                    )
+                    logger.debug("END Selecting action")
+
+                    logger.debug("START Taking action & calculating reward")
+                    # Take action and observe reward and next state
+                    moves = [
+                        index_to_move(actions[idx].item(), board)
                         for idx, board in enumerate(boards)
-                    ],
-                    dim=0,
-                )
-                logger.debug("END Selecting action")
-
-                logger.debug("START Taking action & calculating reward")
-                # Take action and observe reward and next state
-                moves = [
-                    index_to_move(actions[idx].item(), board)
-                    for idx, board in enumerate(boards)
-                ]
-                if any(move is None for move in moves):
-                    logger.warning("Invalid move selected!")
-                    # No handling for invalid moves; just break out of the loop
-                    break
-                rewards = torch.tensor(
-                    [
-                        calculate_reward(board, move)
+                    ]
+                    if any(move is None for move in moves):
+                        logger.warning("Invalid move selected!")
+                        # No handling for invalid moves; just break out of the loop
+                        break
+                    rewards = torch.tensor(
+                        [
+                            calculate_reward(board, move)
+                            for board, move in zip(boards, moves)
+                        ]
+                    ).to(self.device)
+                    # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
+                    default_opp_rewards = [
+                        calculate_reward(board, move, flip_perspective=True)
                         for board, move in zip(boards, moves)
                     ]
-                ).to(self.device)
-                # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
-                default_opp_rewards = [
-                    calculate_reward(board, move, flip_perspective=True)
-                    for board, move in zip(boards, moves)
-                ]
 
-                # Take the action
-                for move, board in zip(moves, boards):
-                    board.push(move)
-                logger.debug("END Taking action & calculating reward")
+                    # Take the action
+                    for move, board in zip(moves, boards):
+                        board.push(move)
+                    logger.debug("END Taking action & calculating reward")
 
-                ### Calculate Opponent Move ###
-                logger.debug("START Preparing Opponent move")
-                opp_next_states = torch.stack(
-                    [board_to_tensor(board, board.turn) for board in boards], dim=0
-                ).to(self.device)
+                    ### Calculate Opponent Move ###
+                    logger.debug("START Preparing Opponent move")
+                    opp_next_states = torch.stack(
+                        [board_to_tensor(board, board.turn) for board in boards], dim=0
+                    ).to(self.device)
 
-                # To process as a batch, we continue processing games that are over with dummy values, but need to ensure that we don't push moves to the board
-                dones = torch.tensor(
-                    [int(board.is_game_over()) for board in boards], device=self.device
-                )
-                logger.debug("END Preparing Opponent move")
+                    # To process as a batch, we continue processing games that are over with dummy values, but need to ensure that we don't push moves to the board
+                    dones = torch.tensor(
+                        [int(board.is_game_over()) for board in boards], device=self.device
+                    )
+                    logger.debug("END Preparing Opponent move")
 
-                logger.debug("START Predicting Opponent Q values")
-                # Select opponent next move
-                with torch.no_grad():
+                    logger.debug("START Predicting Opponent Q values")
+                    # Select opponent next move
                     opp_next_q_values, _ = model(opp_next_states)
-                logger.debug("END Predicting Opponent Q values")
+                    logger.debug("END Predicting Opponent Q values")
 
-                logger.debug("START Masking illegal moves for Opponent")
-                opp_next_legal_moves_mask = torch.stack(
-                    [get_legal_moves_mask(board) for board in boards], dim=0
-                ).to(self.device)
-                opp_masked_next_q_values = opp_next_q_values.masked_fill(
-                    opp_next_legal_moves_mask == 0, -1e10
-                )
-                logger.debug("END Masking illegal moves for Opponent")
+                    logger.debug("START Masking illegal moves for Opponent")
+                    opp_next_legal_moves_mask = torch.stack(
+                        [get_legal_moves_mask(board) for board in boards], dim=0
+                    ).to(self.device)
+                    opp_masked_next_q_values = opp_next_q_values.masked_fill(
+                        opp_next_legal_moves_mask == 0,
+                        torch.finfo(opp_next_q_values.dtype).min,
+                    )
+                    logger.debug("END Masking illegal moves for Opponent")
 
-                logger.debug("START Selecting Opponent action")
-                opp_actions = [
-                    (
-                        self.select_action(
-                            opp_masked_next_q_values[idx], epsilon, board
-                        )
-                        if not done
-                        else -1
-                    )  # -1 is a placeholder when there is no valid move
-                    for idx, (board, done) in enumerate(zip(boards, dones))
-                ]
-                logger.debug("END Selecting Opponent action")
-
-                logger.debug("START Taking Opponent action & calculating reward")
-                # Take opponent action
-                opp_moves = [
-                    index_to_move(opp_action, board) if opp_action != -1 else None
-                    for opp_action, board in zip(opp_actions, boards)
-                ]
-
-                # Calculate reward for opponent move
-                opp_rewards = torch.tensor(
-                    [
-                        calculate_reward(board, opp_move) if opp_move else default
-                        for opp_move, default, board in zip(
-                            opp_moves, default_opp_rewards, boards
-                        )
+                    logger.debug("START Selecting Opponent action")
+                    opp_actions = [
+                        (
+                            self.select_action(
+                                opp_masked_next_q_values[idx], epsilon, board
+                            )
+                            if not done
+                            else -1
+                        )  # -1 is a placeholder when there is no valid move
+                        for idx, (board, done) in enumerate(zip(boards, dones))
                     ]
-                ).to(self.device)
-                for board, opp_move in zip(boards, opp_moves):
-                    if opp_move:
-                        board.push(opp_move)
-                # Check if the game is over after the opponent move
-                opp_dones = torch.tensor(
-                    [int(board.is_game_over()) for board in boards], device=self.device
-                )
-                logger.debug("END Taking Opponent action & calculating reward")
+                    logger.debug("END Selecting Opponent action")
 
-                ### Calculate next state and reward ###
-                # Compute the next-state max Q-value for active player given the opponent's possible move
-                # next_states for done boards are ignored, but we need to provide a tensor of the correct shape so we use the current state (since no move was pushed)
-                logger.debug("START Preparing next state")
-                next_states = torch.stack(
-                    [board_to_tensor(board, board.turn) for board in boards], dim=0
-                ).to(self.device)
-                logger.debug("END Preparing next state")
+                    logger.debug("START Taking Opponent action & calculating reward")
+                    # Take opponent action
+                    opp_moves = [
+                        index_to_move(opp_action, board) if opp_action != -1 else None
+                        for opp_action, board in zip(opp_actions, boards)
+                    ]
 
-                logger.debug("START Predicting next Q values")
-                with torch.no_grad():
+                    # Calculate reward for opponent move
+                    opp_rewards = torch.tensor(
+                        [
+                            calculate_reward(board, opp_move) if opp_move else default
+                            for opp_move, default, board in zip(
+                                opp_moves, default_opp_rewards, boards
+                            )
+                        ]
+                    ).to(self.device)
+                    for board, opp_move in zip(boards, opp_moves):
+                        if opp_move:
+                            board.push(opp_move)
+                    # Check if the game is over after the opponent move
+                    opp_dones = torch.tensor(
+                        [int(board.is_game_over()) for board in boards], device=self.device
+                    )
+                    logger.debug("END Taking Opponent action & calculating reward")
+
+                    ### Calculate next state and reward ###
+                    # Compute the next-state max Q-value for active player given the opponent's possible move
+                    # next_states for done boards are ignored, but we need to provide a tensor of the correct shape so we use the current state (since no move was pushed)
+                    logger.debug("START Preparing next state")
+                    next_states = torch.stack(
+                        [board_to_tensor(board, board.turn) for board in boards], dim=0
+                    ).to(self.device)
+                    logger.debug("END Preparing next state")
+
+                    logger.debug("START Predicting next Q values")
                     next_q_values, _ = model(next_states)
-                logger.debug("END Predicting next Q values")
+                    logger.debug("END Predicting next Q values")
 
-                logger.debug("START Masking illegal moves for next state")
-                next_legal_moves_mask = torch.stack(
-                    [get_legal_moves_mask(board) for board in boards], dim=0
-                ).to(self.device)
+                    logger.debug("START Masking illegal moves for next state")
+                    next_legal_moves_mask = torch.stack(
+                        [get_legal_moves_mask(board) for board in boards], dim=0
+                    ).to(self.device)
 
-                masked_next_q_values = next_q_values.masked_fill(
-                    next_legal_moves_mask == 0, -1e10
-                )
-                max_next_q_values = masked_next_q_values.max(1)[0]
-                max_next_q_values[
-                    max_next_q_values == -1e10
-                ] = 0.0  # Set Q-value to 0.0 for situations where no legal moves are available
-                logger.debug("END Masking illegal moves for next state")
+                    masked_next_q_values = next_q_values.masked_fill(
+                        next_legal_moves_mask == 0,
+                        torch.finfo(next_q_values.dtype).min,
+                    )
+                    max_next_q_values = masked_next_q_values.max(1)[0]
+                    max_next_q_values[
+                        max_next_q_values == torch.finfo(max_next_q_values.dtype).min,
+                    ] = 0.0  # Set Q-value to 0.0 for situations where no legal moves are available
+                    logger.debug("END Masking illegal moves for next state")
 
-                logger.debug("START Calculating target Q value")
-                # Roll back the board state to before the opponent move (if any opponent move was made)
-                for board, opp_move in zip(boards, opp_moves):
-                    if opp_move:
-                        board.pop()
+                    logger.debug("START Calculating target Q value")
+                    # Roll back the board state to before the opponent move (if any opponent move was made)
+                    for board, opp_move in zip(boards, opp_moves):
+                        if opp_move:
+                            board.pop()
 
-                # Handle boards where opponent had no valid moves (game was over)
-                # NOTE: is 0.0 the correct default value for max_next_q_values?
-                max_next_q_values.masked_fill(dones == 1, 0.0)
-                # Compute the target Q-value
-                target_q_value = (
-                    rewards - opp_rewards + (gamma * max_next_q_values * (1 - dones))
-                )
-                predicted_q = predicted_q_values.gather(1, actions)
-                logger.debug("END Calculating target Q value")
+                    # Handle boards where opponent had no valid moves (game was over)
+                    # NOTE: is 0.0 the correct default value for max_next_q_values?
+                    max_next_q_values.masked_fill(dones == 1, 0.0)
+                    # Compute the target Q-value
+                    target_q_value = (
+                        rewards - opp_rewards + (gamma * max_next_q_values * (1 - dones))
+                    )
+                    predicted_q = predicted_q_values.gather(1, actions)
+                    logger.debug("END Calculating target Q value")
 
                 logger.debug("START Creating ExperienceRecord")
                 # Create separate ExperienceRecord for each board
@@ -463,6 +514,7 @@ class DeepQTrainer:
         model: nn.Module,
         target_model: nn.Module,
         optimizer: optim.Optimizer,
+        scaler: torch.amp.GradScaler,
         q_loss_fn: torch.nn.Module,
         aux_loss_fn: torch.nn.Module,
         gamma: float,
@@ -473,7 +525,15 @@ class DeepQTrainer:
     ) -> tuple[float, float]:
         total_q_loss = 0.0
         total_aux_loss = 0.0
+        model.train()
+        enable_amp = self.device.type == "cuda"
+        last_logged_loss = 0.0
+        last_logged_q_loss = 0.0
+        last_logged_aux_loss = 0.0
+        last_logged_step = 0
         for step in tqdm(range(steps), total=steps, desc="Learning"):
+            optimizer.zero_grad()
+
             batch = self.experience_buffer.sample_n(batch_size)
             state_batch = torch.stack([exp.state for exp in batch], dim=0)
             legal_moves_mask_batch = torch.stack(
@@ -494,14 +554,15 @@ class DeepQTrainer:
                 [int(exp.opp_done) for exp in batch], device=self.device
             )
 
-            predicted_q_values, aux_logits = model(state_batch)
-            predicted_q = predicted_q_values.gather(1, action_batch)
+            with torch.amp.autocast("cuda", enabled=enable_amp):
+                predicted_q_values, aux_logits = model(state_batch)
+                predicted_q = predicted_q_values.gather(1, action_batch)
 
             # Use target network for next Q-values
-            with torch.no_grad():
+            with torch.no_grad(), torch.amp.autocast("cuda", enabled=enable_amp):
                 next_q_values, _ = target_model(next_state_batch)
                 masked_next_q_values = next_q_values.masked_fill(
-                    next_legal_moves_mask_batch == 0, -1e10
+                    next_legal_moves_mask_batch == 0, torch.finfo(next_q_values.dtype).min
                 )
                 max_next_q_values = masked_next_q_values.max(1)[0]
                 masked_max_next_q_values = (
@@ -518,16 +579,32 @@ class DeepQTrainer:
             loss = q_loss + aux_loss
 
             # Backpropagation
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)  # Unscale before gradient clipping
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(), app_config.MODEL_CLIP_GRAD
             )
-            optimizer.step()
-            optimizer.zero_grad()
+            scaler.step(optimizer)
+            scaler.update()
 
-            self.writer.add_scalar("Loss/Step", loss.item(), step + step_offset)
-            self.writer.add_scalar("QLoss/Step", q_loss.item(), step + step_offset)
-            self.writer.add_scalar("AuxLoss/Step", aux_loss.item(), step + step_offset)
+            if step - last_logged_step >= 100:
+                total_loss = total_q_loss + total_aux_loss
+                log_loss = (total_loss - last_logged_loss) / (step - last_logged_step)
+                log_q_loss = (total_q_loss - last_logged_q_loss) / (
+                    step - last_logged_step
+                )
+                log_aux_loss = (total_aux_loss - last_logged_aux_loss) / (
+                    step - last_logged_step
+                )
+
+                self.writer.add_scalar("Train/Loss", log_loss, step + step_offset)
+                self.writer.add_scalar("Train/QLoss", log_q_loss, step + step_offset)
+                self.writer.add_scalar("Train/AuxLoss", log_aux_loss, step + step_offset)
+
+                last_logged_loss = total_loss
+                last_logged_q_loss = total_q_loss
+                last_logged_aux_loss = total_aux_loss
+                last_logged_step = step
 
             # Update target network
             if (step + 1) % target_update_freq == 0:
@@ -565,10 +642,10 @@ class DeepQTrainer:
         accuracy = correct / total
         precision = precision_score(targets, predictions)
         recall = recall_score(targets, predictions)
-        self.writer.add_scalar("Validation/AuxAccuracy/Step", accuracy, step)
-        self.writer.add_scalar("Validation/AuxPrecision/Step", precision, step)
-        self.writer.add_scalar("Validation/AuxRecall/Step", recall, step)
-        self.writer.add_scalar("Validation/AuxLoss/Step", aux_val_loss, step)
+        self.writer.add_scalar("Validation/AuxAccuracy", accuracy, step)
+        self.writer.add_scalar("Validation/AuxPrecision", precision, step)
+        self.writer.add_scalar("Validation/AuxRecall", recall, step)
+        self.writer.add_scalar("Validation/AuxLoss", aux_val_loss, step)
         return aux_val_loss
 
     def eval_model_sf(self, model: nn.Module, step: int, app_config: AppConfig) -> dict:
@@ -636,18 +713,42 @@ class DeepQTrainer:
         for board_type, kpi_dict in kpis_by_type.items():
             for kpi, value in kpi_dict.items():
                 self.writer.add_scalar(
-                    f"Validation/{board_type}/{kpi}/Step", value, step
+                    f"Validation/{board_type}/{kpi}", value, step
                 )
 
         for kpi, value in overall_kpis.items():
-            self.writer.add_scalar(f"Validation/{kpi}/Step", value, step)
+            self.writer.add_scalar(f"Validation/{kpi}", value, step)
 
         return {"overall": overall_kpis, "by_type": dict(kpis_by_type)}
 
     def fill_experience_buffer(
-        self, model: nn.Module, epsilon: float, gamma: float, app_config: AppConfig
-    ):
-        logger.info("Filling experience buffer")
+        self,
+        model: nn.Module,
+        epsilon: float,
+        gamma: float,
+        app_config: AppConfig,
+        use_curriculum_experiences: bool = True,
+    ) -> None:
+        """
+        Fill the experience buffer with random exploration or pre-generated experiences.
+
+        :param model: The model to use for exploration
+        :param epsilon: The exploration rate
+        :param gamma: The discount factor
+        :param app_config: The AppConfig object
+        :param use_curriculum_experiences: Whether to use pre-generated experiences
+        """
+        if use_curriculum_experiences:
+            # Load curriculum experience buffer
+            logger.info("Filling experience buffer with curriculum data")
+            while len(self.experience_buffer.buffer) < app_config.MODEL_BUFFER_SIZE and self.buffer_file_list:
+                self.augment_experience_buffer()
+
+        if len(self.experience_buffer.buffer) >= app_config.MODEL_BUFFER_SIZE:
+            # Buffer is already full from curriculum data
+            return
+
+        logger.info("Filling experience buffer with random exploration")
         # Fill the experience buffer
         # We don't count this towards the total number of episodes
         desired_additional_experience = app_config.MODEL_BUFFER_SIZE - len(
@@ -682,6 +783,7 @@ class DeepQTrainer:
         app_config: AppConfig = AppConfig(),
         start_episode: int = 0,
         start_step: int = 0,
+        use_curriculum_experiences: bool = True,
     ) -> nn.Module:
         model.to(self.device)
         target_model = copy.deepcopy(model).to(self.device)
@@ -694,6 +796,9 @@ class DeepQTrainer:
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=t_max, eta_min=1e-6
         )
+
+        use_amp = self.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
         if start_episode > 0:
             # Convert start_episode to the corresponding epoch
@@ -729,7 +834,14 @@ class DeepQTrainer:
             ),
             app_config.MODEL_MIN_EPSILON,
         )
-        self.fill_experience_buffer(model, epsilon, gamma, app_config)
+        self.fill_experience_buffer(
+            model,
+            epsilon,
+            gamma,
+            app_config,
+            use_curriculum_experiences=use_curriculum_experiences,
+        )
+        experience_counter = 0
 
         while episode < episodes:
             gamma = min(
@@ -746,12 +858,21 @@ class DeepQTrainer:
                 app_config.MODEL_BATCH_SIZE,
             )
             self.experience_buffer.extend(new_experiences)
+            experience_counter += len(new_experiences)
+
+            if experience_counter >= app_config.MODEL_BUFFER_SIZE:
+                # Experience replay buffer has fully cycled
+                experience_counter = 0
+                if use_curriculum_experiences and self.buffer_file_list:
+                    self.augment_experience_buffer()
+
             episode += app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE
 
             total_q_loss, total_aux_loss = self.learn(
                 model=model,
                 target_model=target_model,
                 optimizer=optimizer,
+                scaler=scaler,
                 q_loss_fn=q_loss_fn,
                 aux_loss_fn=aux_loss_fn,
                 gamma=gamma,
@@ -763,11 +884,11 @@ class DeepQTrainer:
             step += app_config.MODEL_LEARN_STEPS
 
             # Log metrics to Tensorboard
-            self.writer.add_scalar("TotalQLoss/Step", total_q_loss, step)
-            self.writer.add_scalar("TotalAuxLoss/Step", total_aux_loss, step)
-            self.writer.add_scalar("Epsilon/Step", epsilon, step)
-            self.writer.add_scalar("Gamma/Step", gamma, step)
-            self.writer.add_scalar("LR/Step", scheduler.get_last_lr()[0], step)
+            self.writer.add_scalar("TotalQLoss", total_q_loss, step)
+            self.writer.add_scalar("TotalAuxLoss", total_aux_loss, step)
+            self.writer.add_scalar("Epsilon", epsilon, step)
+            self.writer.add_scalar("Gamma", gamma, step)
+            self.writer.add_scalar("LR", scheduler.get_last_lr()[0], step)
 
             logger.info(
                 f"Episode {episode}, QLoss: {total_q_loss}, AuxLoss: {total_aux_loss}"
@@ -965,6 +1086,13 @@ if __name__ == "__main__":
         default=None,
     )
 
+    argparser.add_argument(
+        "--use-curriculum",
+        type=bool,
+        help="Whether to use curriculum data for training",
+        default=True,
+    )
+
     args = argparser.parse_args()
 
     device = DeepQTrainer.select_device()
@@ -1009,4 +1137,5 @@ if __name__ == "__main__":
         app_config=app_config,
         start_episode=start_episode,
         start_step=start_step,
+        use_curriculum_experiences=args.use_curriculum,
     )
