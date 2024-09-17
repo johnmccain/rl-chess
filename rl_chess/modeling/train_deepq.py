@@ -958,6 +958,13 @@ if __name__ == "__main__":
         default=100000,
     )
 
+    argparser.add_argument(
+        "--pretrained",
+        type=str,
+        help="Path to a pretrained model to load",
+        default=None,
+    )
+
     args = argparser.parse_args()
 
     device = DeepQTrainer.select_device()
@@ -983,6 +990,12 @@ if __name__ == "__main__":
     else:
         app_config = AppConfig()
         model = create_model("EnsembleCNNTransformer", app_config, device)
+        if args.pretrained:
+            logger.info(f"Loading pretrained model from {args.pretrained}")
+            with open(base_path/args.pretrained, "rb") as f:
+                pretrained_model = pickle.load(f)
+            model.load_state_dict(pretrained_model.state_dict())
+            del pretrained_model
         optimizer = optim.AdamW(model.parameters(), lr=app_config.MODEL_LR)
         model_timestamp = None
         start_episode = 0
