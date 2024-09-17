@@ -37,5 +37,6 @@ for depth in range(1, 6):
     results = [simulate_game(chess_agent, minimax_agent, depth) for _ in range(N_GAMES)]
     agent_wins = sum(result[0] for result in results)
     minimax_wins = sum(result[1] for result in results)
-    print(f"Results: agent {agent_wins}, minimax {minimax_wins}")
+    draws = N_GAMES - agent_wins - minimax_wins
+    print(f"Results: agent {agent_wins}, minimax {minimax_wins}, draws {draws}")
     print()
