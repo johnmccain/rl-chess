@@ -30,6 +30,8 @@ class AppConfig(BaseModel):
 
     LOG_LEVEL: str = config["log.level"]
 
+    MODEL_CLASS: str = config["model.class"]
+
     MODEL_LR: float = config["model.lr"]
     MODEL_GAMMA_STARTUP_STEPS: int = config["model.gamma_startup_steps"]
     MODEL_GAMMA_RAMP_STEPS: int = config["model.gamma_ramp_steps"]

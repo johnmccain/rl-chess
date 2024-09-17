@@ -283,6 +283,8 @@ class GameInterface:
         Highlight the top-rated moves on the board with a gradient of colors outlining the squares.
         Blue indicates a low score, red indicates a high score.
         """
+        if not move_scores:
+            return
         max_score = max(move_scores.values())
         min_score = min(move_scores.values())
         for move, score in move_scores.items():

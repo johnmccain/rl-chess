@@ -1,5 +1,6 @@
 import logging
 import random
+import pickle
 
 import chess
 import torch
@@ -8,6 +9,7 @@ from rl_chess import base_path
 from rl_chess.config.config import AppConfig
 from rl_chess.modeling.chess_cnn import ChessCNN
 from rl_chess.modeling.chess_transformer import ChessTransformer
+from rl_chess.modeling.chess_ensemble import EnsembleCNNTransformer
 from rl_chess.modeling.utils import (
     board_to_tensor,
     calculate_reward,
@@ -23,57 +25,66 @@ class ChessAgent:
         self, app_config: AppConfig = AppConfig(), device: str = "cpu"
     ) -> None:
         self.device = torch.device(device)
-        self.model: ChessTransformer | ChessCNN = self.load_cnn_model(app_config)
+        self.model: ChessTransformer | ChessCNN | EnsembleCNNTransformer = self.load_model(app_config)
         self.model.to(self.device)
 
-    def load_model(self, app_config: AppConfig = AppConfig()) -> ChessTransformer:
+    def load_model(self, app_config: AppConfig = AppConfig()) -> ChessTransformer | ChessCNN | EnsembleCNNTransformer:
         """
-        Load a trained ChessTransformer model from disk.
+        Load a trained model from disk.
 
         :param app_config: The application configuration.
 
-        :returns: The trained ChessTransformer model.
+        :returns: The trained model.
         """
-        model = ChessTransformer(
-            d_model=256,
-            nhead=8,
-            num_layers=4,
-            dim_feedforward=512,
-            dropout=0.1,
-        )
-        logger.info(
-            f"Loading model from {base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME}"
-        )
-        model.load_state_dict(
-            torch.load(
-                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME,
-                map_location=self.device,
-            )
-        )
-        model.eval()
-        return model
-
-    def load_cnn_model(self, app_config: AppConfig = AppConfig()) -> ChessCNN:
-        """
-        Load a trained ChessCNN model from disk.
-
-        :param app_config: The application configuration.
-
-        :returns: The trained ChessCNN model.
-        """
-        model = ChessCNN(
-            num_filters=app_config.MODEL_CNN_NUM_FILTERS,
-            num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
-        )
-        logger.info(
-            f"Loading model from {base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME}"
-        )
-        model.load_state_dict(
-            torch.load(
-                base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME,
-                map_location=self.device,
-            )
-        )
+        if app_config.APP_MODEL_NAME.endswith(".pt"):
+            # Load state dict
+            # Use config to determine model type
+            if app_config.MODEL_CLASS == "ChessTransformer":
+                model = ChessTransformer(
+                    d_model=256,
+                    nhead=8,
+                    num_layers=4,
+                    dim_feedforward=512,
+                    dropout=0.1,
+                )
+            elif app_config.MODEL_CLASS == "ChessCNN":
+                model = ChessCNN(
+                    num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+                    num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+                    negative_slope=app_config.MODEL_CNN_NEGATIVE_SLOPE,
+                    dropout=app_config.MODEL_CNN_DROPOUT,
+                )
+            elif app_config.MODEL_CLASS == "EnsembleCNNTransformer":
+                model = EnsembleCNNTransformer(
+                    cnn=ChessCNN(
+                        num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+                        num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+                        negative_slope=app_config.MODEL_CNN_NEGATIVE_SLOPE,
+                        dropout=app_config.MODEL_CNN_DROPOUT,
+                    ),
+                    transformer=ChessTransformer(
+                        d_model=app_config.MODEL_TRANSFORMER_D_MODEL,
+                        nhead=app_config.MODEL_TRANSFORMER_NUM_HEADS,
+                        num_layers=app_config.MODEL_TRANSFORMER_NUM_LAYERS,
+                        dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
+                        dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
+                        freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
+                        add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
+                    ),
+                )
+            else:
+                raise ValueError(f"Invalid model class {app_config.MODEL_CLASS}.")
+            with open(base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME, "rb") as f:
+                state_dict = torch.load(f, map_location=self.device)
+                model.load_state_dict(state_dict)
+        elif app_config.APP_MODEL_NAME.endswith(".pkl"):
+            # Load model
+            with open(base_path / app_config.APP_OUTPUT_DIR / app_config.APP_MODEL_NAME, "rb") as f:
+                model = pickle.load(f)
+                model.to(self.device)
+                assert isinstance(model, (ChessTransformer, ChessCNN, EnsembleCNNTransformer))
+        else:
+            raise ValueError("Invalid model file extension.")
         model.eval()
         return model
 

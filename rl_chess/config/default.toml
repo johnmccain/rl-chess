@@ -6,12 +6,15 @@ EVAL_STEPS = 2000
 MOVE_EVAL_DATASET = "fen_validation_dataset.csv"
 
 # MODEL_NAME = "model_20240728-182541_final.pt"
-MODEL_NAME = "model_20240811-183542_e8448.pt"
+# MODEL_NAME = "pretrained_EnsembleCNNTransformer_20240915172453_final.pkl"
+MODEL_NAME = "model_20240915-175633_e100032.pt"
 
 [LOG]
 LEVEL = "INFO"
 
 [MODEL]
+
+CLASS = "EnsembleCNNTransformer"
 
 LR = 1e-4
 BATCH_SIZE = 64
