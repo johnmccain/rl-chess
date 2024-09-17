@@ -17,7 +17,10 @@ def calculate_material_score(board: chess.Board) -> float:
         chess.BISHOP: 3,
         chess.ROOK: 5,
         chess.QUEEN: 9,
-        chess.KING: 0,  # Not counting the king in material balance
+        # If the king has no material value, then we run into a situation where (king + queen + pawn) vs (king) is equivalent to (king + pawn) vs (king)
+        # This leads to disregarding material advantage in the endgame, which is not desirable
+        # Assigning the king a value ensures that the denominator of the total material is always greater than a single player's material
+        chess.KING: 10,
     }
 
     white_material = sum(
@@ -61,6 +64,8 @@ def calculate_move_quality(board: chess.Board, move: chess.Move) -> float:
     return score
 
 
+CHECKMATE_REWARD = 5.0
+
 def calculate_reward(
     board: chess.Board, move: chess.Move, flip_perspective: bool = False
 ) -> float:
@@ -69,7 +74,7 @@ def calculate_reward(
     board.push(move)
 
     if board.is_checkmate():
-        reward = 1 if board.turn != player else -1
+        reward = CHECKMATE_REWARD if board.turn != player else -CHECKMATE_REWARD
     elif board.is_stalemate() or board.is_insufficient_material():
         reward = 0
     else:
