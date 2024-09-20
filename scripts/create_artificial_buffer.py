@@ -15,6 +15,7 @@ import pandas as pd
 import torch
 from chess import Board, Move
 from tqdm import tqdm
+import argparse
 
 from rl_chess import base_path
 from rl_chess.config.config import AppConfig
@@ -43,9 +44,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger = logging.getLogger(__name__)
 
 BUFFER_PATH = base_path / "data" / "full_move_evals"
+# BUFFER_PATH = base_path / "data" / "curriculum_buffers"
 
 
-def write_buffer_to_file(buffer: list[ExperienceRecord]):
+def write_buffer_to_file(buffer: list[ExperienceRecord] | list[FullEvaluationRecord]):
     file_name = f"{uuid.uuid4()}.pkl.gzip"
     file_path = str(BUFFER_PATH / file_name)
     with gzip.open(file_path, "wb") as f:
@@ -54,35 +56,49 @@ def write_buffer_to_file(buffer: list[ExperienceRecord]):
         pickle.dump(buffer, f)
 
 
-def main():
+def main(args: argparse.Namespace):
     pgn_path = base_path / "data" / "DATABASE4U.pgn"
     NUM_BUFFERS = 1024 * 8
     BUFFER_SIZE = 2000
     buffers_created = 0
+    mode: str = args.mode
+    assert mode in ("experiences", "full_evaluations")
 
     progress = tqdm(total=NUM_BUFFERS, desc="Creating buffers")
 
-    states_generator = generate_states(pgn_path)
+    states_generator = generate_states(pgn_path, skip=0)
     states_buffer = []
-    buf_progress = tqdm(desc="Creating buffer", total=BUFFER_SIZE, leave=False)
+    experiences_buffer = []
     for state in states_generator:
         states_buffer.append(state)
-        buf_progress.update(1)
-        if len(states_buffer) >= BUFFER_SIZE:
-            # experiences = create_experiences(states_buffer)
-            experiences = create_full_evaluation(states_buffer)
+        if len(states_buffer) >= 400:
+            if mode == "full_evaluations":
+                experiences = create_full_evaluation(states_buffer)
+            else:
+                experiences = create_experiences(states_buffer)
+            experiences_buffer.extend(experiences)
             states_buffer = []
+
+        if len(experiences_buffer) >= BUFFER_SIZE:
+            # experiences = create_experiences(states_buffer)
+            experiences, experiences_buffer = experiences_buffer[:BUFFER_SIZE], experiences_buffer[BUFFER_SIZE:]
             write_buffer_to_file(experiences)
             buffers_created += 1
             progress.update(1)
-            buf_progress.reset()
         if buffers_created >= NUM_BUFFERS:
             break
 
 
-def generate_states(pgn_path: str) -> Generator[tuple[tuple[str, str], tuple[str, str], tuple[str, str]], None, None]:
+def generate_states(pgn_path: str, skip: int = 0) -> Generator[tuple[tuple[str, str], tuple[str, str], tuple[str, str]], None, None]:
     done = False
-    with open(pgn_path, "r") as f:
+    with open(pgn_path, "r", errors="ignore") as f:
+        if skip:
+            skip_progress = tqdm(total=skip, desc="Skipping games", leave=False)
+            while skip > 0:
+                line = next(f)
+                if line.startswith("[Event"):
+                    skip -= 1
+                    skip_progress.update(1)
         while not done:
             try:
                 buf = collections.deque(maxlen=3)
@@ -156,32 +172,35 @@ def create_full_evaluation(
 ) -> list[FullEvaluationRecord]:
     records = []
     with torch.no_grad():
-        for (fen1, uci1), (fen2, uci2), (fen3, uci3) in tqdm(
-            states, desc="Creating experiences", leave=False
-        ):
+        for (fen1, uci1), (fen2, uci2), (fen3, uci3) in states:
+            fen = fen3
             # Three moves--player,opponent,player
-            board1 = chess.Board(fen1)
+            board = chess.Board(fen)
 
-            state1 = board_to_tensor(board1, board1.turn).to(device)
-            legal_moves_mask1 = get_legal_moves_mask(board1).to(device)
-            done = board1.is_game_over()
+            state = board_to_tensor(board, board.turn).to(device)
+            legal_moves_mask = get_legal_moves_mask(board).to(device)
+            done = board.is_game_over()
 
-            rewards = torch.full_like(legal_moves_mask1, -1e6)
+            rewards = torch.full_like(legal_moves_mask, -1e6)
 
-            for move in board1.legal_moves:
-                rewards[move_to_index(move)] = calculate_reward(board1, move)
+            for move in board.legal_moves:
+                rewards[move_to_index(move)] = calculate_reward(board, move)
 
             record = FullEvaluationRecord(
-                fen=fen1,
-                state=state1,
-                legal_moves_mask=legal_moves_mask1,
+                fen=fen,
+                state=state,
+                legal_moves_mask=legal_moves_mask,
                 rewards=rewards,
                 done=done,
-                color=board1.turn,
+                color=board.turn,
             )
             records.append(record)
     return records
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", type=str, help="experiences or full_evaluations", default="experiences")
+    args = parser.parse_args()
+
+    main(args)
