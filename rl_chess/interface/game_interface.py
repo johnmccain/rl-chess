@@ -7,6 +7,7 @@ from typing import Literal
 import chess
 import pygame as pg
 import pygame_widgets.button
+import pygame_widgets.toggle
 
 from rl_chess import base_path
 from rl_chess.inference.inference import ChessAgent
@@ -30,6 +31,7 @@ class GameInterface:
         pass
 
         self.font = font or pg.font.SysFont("Courier New", 32, bold=True)
+        self.small_font = pg.font.SysFont("Courier New", 12, bold=True)
         self.screen = pg.display.set_mode(
             [
                 self.SQUARE_SIZE * 8 + self.FONT_PADDING,
@@ -145,7 +147,9 @@ class GameInterface:
                     self.FONT_PADDING / 2 + self.SQUARE_SIZE * idx,
                 ),
             )
-        for idx, file in enumerate(chess.FILE_NAMES):
+        for idx, file in enumerate(
+            chess.FILE_NAMES[:: 1 if perspective == chess.WHITE else -1]
+        ):
             text = self.font.render(file, False, (0, 0, 0))
             self.screen.blit(text, (self.FONT_PADDING / 2 + self.SQUARE_SIZE * idx, 0))
             self.screen.blit(
@@ -181,20 +185,23 @@ class GameInterface:
             4,
         )
 
-    def draw_selected(self, board: chess.Board, square: chess.Square) -> None:
-        self.draw_highlight(square, self.SELECTED_SQUARE_TINT, board.turn)
+    def draw_selected(self, board: chess.Board, square: chess.Square, perspective: bool | None = None) -> None:
+        color = perspective if perspective is not None else board.turn
+        self.draw_highlight(square, self.SELECTED_SQUARE_TINT, color)
 
-    def draw_legal_moves(self, board: chess.Board, square: chess.Square) -> None:
+    def draw_legal_moves(self, board: chess.Board, square: chess.Square, perspective: bool | None = None) -> None:
+        color = perspective if perspective is not None else board.turn
         for move in board.legal_moves:
             if move.from_square == square:
-                self.draw_highlight(move.to_square, self.LEGAL_MOVE_TINT, board.turn)
+                self.draw_highlight(move.to_square, self.LEGAL_MOVE_TINT, color)
 
-    def draw_pieces(self, board: chess.Board) -> None:
+    def draw_pieces(self, board: chess.Board, perspective: bool | None = None) -> None:
+        perspective_color = perspective if perspective is not None else board.turn
         for square in chess.SQUARES:
             piece = board.piece_at(square)
             if piece is not None:
                 row, col = chess.square_rank(square), chess.square_file(square)
-                if board.turn == chess.BLACK:
+                if chess.BLACK != perspective_color:
                     row = 7 - row
                     col = 7 - col
                 image = self.piece_images[piece.symbol()]
@@ -206,8 +213,9 @@ class GameInterface:
                     ),
                 )
 
-    def select_color(self) -> chess.Color:
+    def select_color(self) -> tuple[chess.Color, bool]:
         selected_color: chess.Color | str | None = None
+        flipped_mode = False
 
         def on_click(action: Literal["white", "black", "random"]) -> None:
             nonlocal selected_color
@@ -264,6 +272,20 @@ class GameInterface:
             onClick=functools.partial(on_click, "random"),
         )
 
+        flipped_toggle = pygame_widgets.toggle.Toggle(
+            self.screen,
+            40,
+            40,
+            40,
+            20,
+            startOn=False,
+            onColour=(0, 255, 0),
+            offColour=(255, 0, 0),
+        )
+
+        flipped_text = self.small_font.render("Flipped Mode", True, (255, 255, 255))
+        flipped_text_rect = flipped_text.get_rect(center=(75, 25))
+
         while selected_color is None:
             events = pg.event.get()
             for event in events:
@@ -273,16 +295,22 @@ class GameInterface:
             white_button.draw()
             black_button.draw()
             random_button.draw()
+            flipped_toggle.draw()
+            self.screen.blit(flipped_text, flipped_text_rect)
             pg.display.update()
-        return selected_color
+
+        flipped_mode = flipped_toggle.getValue()
+        return selected_color, flipped_mode
 
     def display_move_scores(
-        self, board: chess.Board, move_scores: dict[chess.Move, float]
+        self, board: chess.Board, move_scores: dict[chess.Move, float], perspective: bool | None = None
     ) -> None:
         """
         Highlight the top-rated moves on the board with a gradient of colors outlining the squares.
         Blue indicates a low score, red indicates a high score.
+        Displays the move score rounded to 2 decimal places in the top right of the square.
         """
+        color = perspective if perspective is not None else board.turn
         if not move_scores:
             return
         max_score = max(move_scores.values())
@@ -290,7 +318,7 @@ class GameInterface:
         for move, score in move_scores.items():
             square = move.to_square
             row, col = chess.square_rank(square), chess.square_file(square)
-            if board.turn == chess.BLACK:
+            if color == chess.BLACK:
                 row = 7 - row
                 col = 7 - col
             orig_square_color = (
@@ -312,18 +340,33 @@ class GameInterface:
                 4,
             )
 
+            # Render the score rounded to 2 decimal places
+            score_text = f"{score:.2f}"
+            text_surface = self.small_font.render(score_text, True, (0, 0, 0))  # Black text
+            text_rect = text_surface.get_rect(
+                topright=(
+                    self.FONT_PADDING / 2 + self.SQUARE_SIZE * (col + 1) - 5,
+                    self.FONT_PADDING / 2 + self.SQUARE_SIZE * (7 - row) + 5,
+                )
+            )
+
+            # Draw the score text on the screen
+            self.screen.blit(text_surface, text_rect)
+
     def update_display(
         self,
         board: chess.Board,
         selected_square: chess.Square | None = None,
         move_scores: dict[chess.Move, float] | None = None,
+        flipped_mode: bool = False,
     ) -> None:
-        self.draw_blank_board(board.turn)
+        perspective = not board.turn if flipped_mode else board.turn
+        self.draw_blank_board(perspective)
         if selected_square is not None:
-            self.draw_selected(board, selected_square)
-            self.draw_legal_moves(board, selected_square)
+            self.draw_selected(board, selected_square, perspective=perspective)
+            self.draw_legal_moves(board, selected_square, perspective=perspective)
         if move_scores is not None:
-            self.display_move_scores(board, move_scores)
+            self.display_move_scores(board, move_scores, perspective=perspective)
         self.draw_pieces(board)
         if board.is_game_over():
             outcome = board.outcome()
@@ -358,9 +401,10 @@ class GameRunner:
                 return chess.Move(start_square, end_square, promotion=chess.QUEEN)
         return chess.Move(start_square, end_square)
 
-    def handle_mouseup(self, xpos: int, ypos: int) -> None:
+    def handle_mouseup(self, xpos: int, ypos: int, perspective: bool | None = None) -> None:
+        color = perspective if perspective is not None else self.board.turn
         logger.debug(f"Mouse up at ({xpos}, {ypos})")
-        square = self.game_interface.get_square(xpos, ypos, self.board.turn)
+        square = self.game_interface.get_square(xpos, ypos, color)
         if square is None:
             logger.debug("Mouse up off the board")
         elif self.selected_square is None:
@@ -387,19 +431,21 @@ class GameRunner:
         time.sleep(1)
 
     def run(self) -> None:
-        player_color = self.game_interface.select_color()
+        player_color, flipped_mode = self.game_interface.select_color()
+        perspective_color = player_color if not flipped_mode else not player_color
         while self.running:
             self.game_interface.update_display(
                 board=self.board,
                 selected_square=self.selected_square,
                 move_scores=self.move_scores,
+                flipped_mode=flipped_mode,
             )
             for event in pg.event.get():
                 if event.type == pg.QUIT:
                     logger.info("Quitting game")
                     self.running = False
                 elif event.type == pg.MOUSEBUTTONUP and self.board.turn == player_color:
-                    self.handle_mouseup(*pg.mouse.get_pos())
+                    self.handle_mouseup(*pg.mouse.get_pos(), perspective=perspective_color)
             if self.board.turn != player_color and not self.board.is_game_over():
                 self.ai_move(self.board)
             if (
