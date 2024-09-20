@@ -920,8 +920,9 @@ class DeepQTrainer:
                 app_config.MODEL_MIN_EPSILON,
             )
 
-            # Learning rate scheduler
-            scheduler.step()
+            # Learning rate scheduler, iterate once per episode
+            for _ in range(app_config.MODEL_EXPLORE_EPISODES * app_config.MODEL_BATCH_SIZE):
+                scheduler.step()
 
         self.writer.close()
         self.save_checkpoint(model, optimizer, episode)
