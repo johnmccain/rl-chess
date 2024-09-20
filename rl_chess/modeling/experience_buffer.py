@@ -17,6 +17,7 @@ class FullEvaluationRecord:
     rewards: torch.Tensor
     done: bool
     color: chess.Color | None = None
+    move_count: int = 0  # move count (measured in half-turns)
 
     def make_serializeable(self) -> dict:
         """
@@ -29,6 +30,7 @@ class FullEvaluationRecord:
             "rewards": self.rewards.cpu().numpy(),  # (4096,) tensor
             "done": self.done,
             "color": self.color,
+            "move_count": self.move_count,
         }
 
     @classmethod
@@ -43,6 +45,7 @@ class FullEvaluationRecord:
             rewards=torch.tensor(serialized["rewards"]),
             done=serialized["done"],
             color=serialized["color"],
+            move_count=serialized["move_count"],
         )
 
 
@@ -60,6 +63,7 @@ class ExperienceRecord:
     pred_q_values: torch.Tensor | None = field(default=None, compare=False)
     max_next_q: float | None = field(default=None, compare=False)
     color: chess.Color | None = None
+    move_count: int = 0  # move count (measured in half-turns)
 
     def make_serializeable(self) -> dict:
         """
@@ -82,6 +86,7 @@ class ExperienceRecord:
             ),
             "max_next_q": self.max_next_q,
             "color": self.color,
+            "move_count": self.move_count,
         }
 
     @classmethod
@@ -106,6 +111,7 @@ class ExperienceRecord:
             ),
             max_next_q=serialized["max_next_q"],
             color=serialized["color"],
+            move_count=serialized["move_count"],
         )
 
 

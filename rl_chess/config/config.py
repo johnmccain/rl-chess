@@ -27,6 +27,8 @@ class AppConfig(BaseModel):
     APP_EVAL_STEPS: int = config["app.eval_steps"]
     APP_MODEL_NAME: str = config["app.model_name"]
     APP_MOVE_EVAL_DATASET: str = config["app.move_eval_dataset"]
+    APP_CHECKMATE_REWARD: float = config["app.checkmate_reward"]
+    APP_TURN_PENALTY: float = config["app.turn_penalty"]
 
     LOG_LEVEL: str = config["log.level"]
 

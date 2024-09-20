@@ -1,10 +1,14 @@
 import logging
+import collections
 
 import chess
 import numpy as np
 import torch
 
+from rl_chess.config.config import AppConfig
+
 logger = logging.getLogger(__name__)
+default_app_config = AppConfig()
 
 
 def calculate_material_score(board: chess.Board) -> float:
@@ -64,23 +68,78 @@ def calculate_move_quality(board: chess.Board, move: chess.Move) -> float:
     return score
 
 
-CHECKMATE_REWARD = 5.0
+def calculate_turn_penalty(turns: int, app_config: AppConfig = default_app_config) -> float:
+    """
+    Return the turn penalty for the given number of turns.
+    Turn penalty is <=0 and decreases with the number of turns to encourage the model to finish the game quickly.
+    """
+    return app_config.APP_TURN_PENALTY * (turns // 2)
+
+
+def is_threefold_repetition(board: chess.Board) -> bool:
+    """
+    Run a simple check for threefold repetition. Only examine the last 10 moves and after 60 moves (half turns) to avoid performance issues.
+
+    :param board: The current state of the chess game.
+    :returns: True if the position has occurred three times, False otherwise.
+    """
+    if len(board.move_stack) < 60:
+        return False
+
+    temp_stack = []
+    fens = []
+
+    for _ in range(10):
+        move = board.pop()
+        temp_stack.append(move)
+        fens.append(board.fen())
+    while temp_stack:
+        board.push(temp_stack.pop())
+    fen_counts = collections.Counter(fens)
+    if any(count >= 3 for count in fen_counts.values()):
+        return True
+    return False
 
 def calculate_reward(
-    board: chess.Board, move: chess.Move, flip_perspective: bool = False
+    board: chess.Board,
+    move: chess.Move,
+    move_count: int,
+    flip_perspective: bool = False,
+    app_config: AppConfig = default_app_config,
 ) -> float:
+    """
+    Calculate the reward for a given move in the given board state.
+    Stalemate or other non-win outcomes are rewarded with 0.0.
+    Checkmate is rewarded with a large, configurable positive reward, and the opposite for the losing player.
+    Other moves are rewarded based on material score, move quality, and turn penalty.
+        - Material score: The difference in material between the two players as a fraction of the total material.
+        - Move quality: A heuristic score based on the move and common chess strategies.
+        - Turn penalty: A penalty per turn to encourage the model to finish the game quickly.
+
+    :param board: The current state of the chess game.
+    :param move: The move to evaluate.
+    :param move_count: The current move count in the game (measured in half-turns).
+    :param flip_perspective: Whether to flip the perspective of the reward.
+    :param app_config:
+    """
     player = board.turn
-    move_quality = calculate_move_quality(board, move)
     board.push(move)
 
     if board.is_checkmate():
-        reward = CHECKMATE_REWARD if board.turn != player else -CHECKMATE_REWARD
-    elif board.is_stalemate() or board.is_insufficient_material():
-        reward = 0
+        reward = app_config.APP_CHECKMATE_REWARD if board.turn != player else -app_config.APP_CHECKMATE_REWARD
+    elif (
+        board.is_stalemate()
+        or board.is_insufficient_material()
+        or is_threefold_repetition(board)
+        or board.is_seventyfive_moves()
+    ):
+        reward = 0.0
     else:
+        move_quality = calculate_move_quality(board, move)
         # Material score is calculated based on the perspective of the moving player, and we just moved
         material_score = -calculate_material_score(board)
-        reward = material_score + move_quality
+        turn_penalty = calculate_turn_penalty(move_count, app_config)
+        reward = material_score + move_quality + turn_penalty
     board.pop()
 
     if flip_perspective:
