@@ -201,7 +201,7 @@ class GameInterface:
             piece = board.piece_at(square)
             if piece is not None:
                 row, col = chess.square_rank(square), chess.square_file(square)
-                if chess.BLACK != perspective_color:
+                if chess.BLACK == perspective_color:
                     row = 7 - row
                     col = 7 - col
                 image = self.piece_images[piece.symbol()]
@@ -367,7 +367,7 @@ class GameInterface:
             self.draw_legal_moves(board, selected_square, perspective=perspective)
         if move_scores is not None:
             self.display_move_scores(board, move_scores, perspective=perspective)
-        self.draw_pieces(board)
+        self.draw_pieces(board, perspective=perspective)
         if board.is_game_over():
             outcome = board.outcome()
             banner = self.get_victory_banner(outcome)
