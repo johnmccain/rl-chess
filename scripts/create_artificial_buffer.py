@@ -64,7 +64,7 @@ def main(args: argparse.Namespace):
         if mode == "experiences":
             output_path = base_path / "data" / "curriculum_buffers"
         else:
-            output_path = base_path / "data" / "full_move_evals"
+            output_path = base_path / "data" / "full_evaluations"
     else:
         output_path = base_path / "data" / output_path_str
 
@@ -206,7 +206,7 @@ def create_full_evaluation(
                 rewards=rewards,
                 done=done,
                 color=board.turn,
-                move_count=move,
+                move_count=move_count,
             )
             records.append(record)
     return records
