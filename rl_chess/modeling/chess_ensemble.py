@@ -12,9 +12,11 @@ class EnsembleCNNTransformer(nn.Module):
         self.q_weight = nn.Parameter(torch.tensor(0.5), requires_grad=True)
         self.aux_weight = nn.Parameter(torch.tensor(0.5), requires_grad=True)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        cnn_q_hat, cnn_aux_logits = self.cnn(x)
-        transformer_q_hat, transformer_aux_logits = self.transformer(x)
+    def forward(self, x: torch.Tensor, move_count: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # x shape: (batch_size, 64)
+        # move_count shape: (batch_size,)
+        cnn_q_hat, cnn_aux_logits = self.cnn(x, move_count)
+        transformer_q_hat, transformer_aux_logits = self.transformer(x, move_count)
 
         q_hat = cnn_q_hat * self.q_weight + transformer_q_hat * (1 - self.q_weight)
         aux_logits = cnn_aux_logits * self.aux_weight + transformer_aux_logits * (

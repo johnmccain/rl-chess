@@ -11,9 +11,11 @@ class ChessCNN(nn.Module):
         num_residual_blocks: int = 10,
         negative_slope: float = 0.01,
         dropout: float = 0.1,
+        move_count_scale_factor: float = 0.05,
     ):
         super(ChessCNN, self).__init__()
 
+        self.move_count_scale_factor = move_count_scale_factor
         self.negative_slope = negative_slope
         self.activation = (
             nn.LeakyReLU(negative_slope=self.negative_slope)
@@ -25,7 +27,8 @@ class ChessCNN(nn.Module):
         self.num_filters = num_filters
         self.num_residual_blocks = num_residual_blocks
 
-        self.input_conv = nn.Conv2d(12, num_filters, kernel_size=3, padding=1)
+        # 13 for 12 piece types + 1 for move count
+        self.input_conv = nn.Conv2d(13, num_filters, kernel_size=3, padding=1)
         nn.init.kaiming_normal_(
             self.input_conv.weight,
             nonlinearity=self.activation_str,
@@ -61,9 +64,10 @@ class ChessCNN(nn.Module):
 
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, move_count: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # x shape: (batch_size, 64)
-        x = self.preprocess_input(x)  # shape: (batch_size, 12, 8, 8)
+        # move_count shape: (batch_size, 1)
+        x = self.preprocess_input(x, move_count)  # shape: (batch_size, 12, 8, 8)
 
         x = self.activation(self.batch_norm(self.input_conv(x)))
 
@@ -83,20 +87,27 @@ class ChessCNN(nn.Module):
 
         return q_values, auxiliary_logits
 
-    def preprocess_input(self, x: torch.Tensor) -> torch.Tensor:
+    def preprocess_input(self, x: torch.Tensor, move_count: torch.Tensor) -> torch.Tensor:
         # x shape: (batch_size, 64)
-        batch_size = x.size(0)
+        # move_count shape: (batch_size,)
         x = x.long()
 
         # Create one-hot encoded tensor
-        one_hot = torch.zeros(batch_size, 13, 64, device=x.device)
+        one_hot = torch.zeros_like(x.unsqueeze(1).expand(-1, 13, -1))
         one_hot.scatter_(1, x.unsqueeze(1), 1)
 
         # Reshape to 8x8 board
-        one_hot = one_hot.view(batch_size, 13, 8, 8)
+        one_hot = one_hot.view(-1, 13, 8, 8)
+        one_hot = one_hot[:, 1:, :, :]  # Remove the empty square channel
 
-        # Remove the empty square channel (not necessary for CNN)
-        return one_hot[:, 1:, :, :]
+        # Reshape and expand move_count
+        move_count = move_count.view(-1, 1, 1, 1).expand(-1, 1, 8, 8)
+        move_count = move_count * self.move_count_scale_factor
+
+        # Concatenate move count to the input
+        one_hot = torch.cat([one_hot, move_count], dim=1)  # shape: (batch_size, 13, 8, 8)
+
+        return one_hot
 
 
 class ResidualBlock(nn.Module):

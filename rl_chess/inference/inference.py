@@ -69,7 +69,7 @@ class ChessAgent:
                         dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
                         dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
                         freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
-                        add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
+                        # add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
                     ),
                 )
             else:
@@ -104,7 +104,12 @@ class ChessAgent:
 
         with torch.no_grad():  # Disable gradient computation for inference
             # Get the model's predictions for the current state
-            q_values, logits = self.model(current_state)
+            q_values, logits = self.model(
+                current_state,
+                move_count=torch.tensor(
+                    [board.fullmove_number * 2 - int(board.turn)], device=self.device
+                ),
+            )
             q_values = q_values.view(-1)  # Flatten the q values
 
         # Generate a mask for the legal moves
@@ -137,7 +142,12 @@ class ChessAgent:
         current_state = current_state.unsqueeze(0)
 
         with torch.no_grad():
-            q_values, logits = self.model(current_state)
+            q_values, logits = self.model(
+                current_state,
+                move_count=torch.tensor(
+                    [board.fullmove_number * 2 - int(board.turn)], device=self.device
+                ),
+            )
             q_values = q_values.view(-1)
 
         legal_moves_mask = get_legal_moves_mask(board).to(self.device)
@@ -172,7 +182,12 @@ class ChessAgent:
 
         with torch.no_grad():  # Disable gradient computation for inference
             # Get the model's predictions for the current state
-            q_values, logits = self.model(current_state)
+            q_values, logits = self.model(
+                current_state,
+                move_count=torch.tensor(
+                    [board.fullmove_number * 2 - int(board.turn)], device=self.device
+                ),
+            )
             q_values = q_values.view(-1)  # Flatten the q_values
 
         # Generate a mask for the legal moves

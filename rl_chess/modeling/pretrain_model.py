@@ -5,12 +5,19 @@ import os
 import pickle
 import uuid
 from typing import List, Tuple
+from queue import Queue, Empty
+import collections
+import threading
+import argparse
+import pathlib
+import logging
+import random
 
 import torch
 import torch.amp
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
@@ -22,6 +29,121 @@ from rl_chess.modeling.chess_cnn_transformer import ChessCNNTransformer
 from rl_chess.modeling.chess_ensemble import EnsembleCNNTransformer
 from rl_chess.modeling.chess_transformer import ChessTransformer
 from rl_chess.modeling.experience_buffer import FullEvaluationRecord
+
+
+logging.basicConfig(level=logging.INFO, filename="pretrain_model.log")
+logger = logging.getLogger(__name__)
+
+
+class LazyChessDataset(IterableDataset):
+
+    def __init__(
+        self,
+        data_dir: str,
+        file_list: List[str],
+        cache_size: int = 10,
+        prefetch_size: int = 5,
+        shuffle: bool = True,
+        examples_per_file: int | None = None,
+    ):
+        self.data_dir = data_dir
+        self.file_list = file_list
+        self.cache_size = cache_size
+        self.prefetch_size = prefetch_size
+        self.shuffle = shuffle
+        self.cache = collections.OrderedDict()
+        self.file_queue = Queue()
+        self.prefetch_queue = Queue(maxsize=prefetch_size)
+        self.stop_event = threading.Event()
+        self.prefetch_thread = None
+        if examples_per_file is None:
+            logging.info("Loading sample file to determine examples per file")
+            sample_file = self.file_list[0]
+            sample_data = self._load_file(sample_file)
+            examples_per_file = len(sample_data)
+        self.examples_per_file = examples_per_file
+
+    def _load_file(
+        self, file_name: str
+    ) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+        file_path = os.path.join(self.data_dir, file_name)
+        with gzip.open(file_path, "rb") as f:
+            records = pickle.load(f)
+            return [
+                (
+                    record.state,
+                    record.legal_moves_mask,
+                    record.rewards,
+                    record.move_count,
+                )
+                for serialized_record in records
+                for record in [FullEvaluationRecord.from_serialized(serialized_record)]
+            ]
+
+    def _prefetch_worker(self):
+        while not self.stop_event.is_set():
+            try:
+                file_path = self.file_queue.get(timeout=1)
+            except Empty:
+                continue
+
+            if file_path not in self.cache:
+                logger.debug(f"Prefetching file {os.path.basename(file_path)}")
+                data = self._load_file(file_path)
+                self.cache[file_path] = data
+                if len(self.cache) > self.cache_size:
+                    ejected_file_path, _ = self.cache.popitem(last=False)
+                    logger.debug(
+                        f"Ejecting file {os.path.basename(ejected_file_path)} from cache"
+                    )
+
+            self.prefetch_queue.put(self.cache[file_path])
+            self.file_queue.task_done()
+
+    def __iter__(self):
+        logger.info("Starting data loader iteration")
+        if self.prefetch_thread is None or not self.prefetch_thread.is_alive():
+            logger.info("Starting prefetch thread")
+            self.stop_event.clear()
+            self.prefetch_thread = threading.Thread(
+                target=self._prefetch_worker, daemon=True
+            )
+            self.prefetch_thread.start()
+
+        file_list = self.file_list.copy()
+        if self.shuffle:
+            random.shuffle(file_list)
+
+        for file_path in file_list:
+            self.file_queue.put(file_path)
+
+        while not (self.file_queue.empty() and self.prefetch_queue.empty()):
+            try:
+                file_data = self.prefetch_queue.get(timeout=5)
+                yield from file_data
+            except Empty:
+                continue
+
+    def __len__(self) -> int:
+        return self.examples_per_file * len(self.file_list)
+
+    def close(self):
+        self.stop_event.set()
+        if self.prefetch_thread:
+            self.prefetch_thread.join()
+        self.cache.clear()
+
+
+def create_data_loader(
+    data_dir: str, file_list: List[str], batch_size: int, num_workers: int = 4
+):
+    dataset = ChessDataset(data_dir, file_list)
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        collate_fn=lambda x: tuple(torch.stack(samples) for samples in zip(*x)),
+    )
 
 
 class ChessDataset(Dataset):
@@ -44,7 +166,7 @@ class ChessDataset(Dataset):
                 for serialized_record in records:
                     record = FullEvaluationRecord.from_serialized(serialized_record)
                     self.data.append(
-                        (record.state, record.legal_moves_mask, record.rewards)
+                        (record.state, record.legal_moves_mask, record.rewards, torch.tensor(record.move_count))
                     )
 
     def __len__(self):
@@ -80,12 +202,13 @@ def validate_model(
     aux_losses = []
 
     with torch.no_grad():
-        for states, legal_moves_masks, rewards in test_loader:
+        for states, legal_moves_masks, rewards, move_count in test_loader:
             states = states.to(device)
             legal_moves_masks = legal_moves_masks.to(device)
             rewards = rewards.to(device)
+            move_count = move_count.to(device)
 
-            predicted_q_values, aux_logits = model(states)
+            predicted_q_values, aux_logits = model(states, move_count)
 
             element_wise_mse = mse_loss(predicted_q_values, rewards)
             masked_mse = element_wise_mse * legal_moves_masks
@@ -109,11 +232,14 @@ def pretrain_model(
     batch_size: int = 32,
     num_epochs: int = 10,
     learning_rate: float = 1e-4,
+    data_dir: pathlib.Path | None = None,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     timestamp: str | None = None,
 ) -> Tuple[nn.Module, List[float], List[float]]:
     model.to(device)
     model.train()
+    if not data_dir:
+        data_dir = base_path / "data" / "full_evaluations"
 
     if not timestamp:
         timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -130,14 +256,18 @@ def pretrain_model(
     )  # Changed to 'none' to allow element-wise multiplication
     bce_loss = nn.BCEWithLogitsLoss()
 
-    # Create dataset and dataloader
-    data_dir = base_path / "data" / "full_move_evals"
     files = [f for f in os.listdir(data_dir) if f.endswith(".pkl.gzip")]
-    train_files, test_files = train_test_split(files, test_size=0.1)
-    train_dataset = ChessDataset(data_dir=str(data_dir), file_list=train_files)
-    test_dataset = ChessDataset(data_dir=str(data_dir), file_list=test_files)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_files, test_files = train_test_split(files, test_size=5)
+    train_dataset = LazyChessDataset(data_dir=str(data_dir), file_list=train_files)
+    test_dataset = ChessDataset(
+        data_dir=str(data_dir), file_list=test_files
+    )
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues
+    )
+    test_dataloader = DataLoader(test_dataset, batch_size=batch_size)
 
     # Define optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -162,7 +292,7 @@ def pretrain_model(
         last_aux_loss = 0.0
         last_log_step = step
 
-        for states, legal_moves_masks, rewards in tqdm(
+        for states, legal_moves_masks, rewards, move_counts in tqdm(
             train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}"
         ):
             model.train()
@@ -172,10 +302,11 @@ def pretrain_model(
             states = states.to(device)
             legal_moves_masks = legal_moves_masks.to(device)
             rewards = rewards.to(device)
+            move_counts = move_counts.to(device)
 
             # Forward pass
             with torch.amp.autocast("cuda", enabled=(device == "cuda")):
-                predicted_q_values, aux_logits = model(states)
+                predicted_q_values, aux_logits = model(states, move_counts)
 
                 # Calculate losses
                 element_wise_mse = mse_loss(predicted_q_values, rewards)
@@ -229,51 +360,55 @@ def pretrain_model(
         )
         save_model(model, f"{timestamp}_epoch_{epoch+1}")
 
+    train_dataset.close()
     return model, q_losses, aux_losses
 
 
 if __name__ == "__main__":
+    argparser = argparse.ArgumentParser()
+
+    argparser.add_argument("--model", type=str, default="ensemble", choices=["cnn", "transformer", "ensemble"])
+    argparser.add_argument("--epochs", type=int, default=5)
+    argparser.add_argument("--batch_size", type=int, default=128)
+    argparser.add_argument("--learning_rate", type=float, default=3e-4)
+    argparser.add_argument("--data_dir", type=str, default="full_evaluations_v4")
+    args = argparser.parse_args()
+
     app_config = AppConfig()
-    # model = ChessCNN(
-    #     num_filters=128,
-    #     num_residual_blocks=4,
-    #     negative_slope=0.0
-    # )
-    # model = ChessTransformer(
-    #     d_model=128,
-    #     nhead=4,
-    #     num_layers=4,
-    #     dim_feedforward=512,
-    #     dropout=0.0,
-    #     freeze_pos=True,
-    #     add_global=False,
-    # )
-    # model = ChessCNNTransformer(
-    #     num_filters=128,
-    #     num_residual_blocks=5,
-    #     d_model=128,
-    #     nhead=4,
-    #     num_transformer_layers=4,
-    #     dim_feedforward=512,
-    #     dropout=0.0,
-    # )
-    model = EnsembleCNNTransformer(
-        cnn=ChessCNN(
-            num_filters=app_config.MODEL_CNN_NUM_FILTERS,
-            num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
-            negative_slope=app_config.MODEL_CNN_NEGATIVE_SLOPE,
-            dropout=app_config.MODEL_CNN_DROPOUT,
-        ),
-        transformer=ChessTransformer(
-            d_model=app_config.MODEL_TRANSFORMER_D_MODEL,
-            nhead=app_config.MODEL_TRANSFORMER_NUM_HEADS,
-            num_layers=app_config.MODEL_TRANSFORMER_NUM_LAYERS,
-            dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
-            dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
-            freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
-            add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
-        ),
-    )
+    if args.model == "cnn":
+        model = ChessCNN(
+            num_filters=128,
+            num_residual_blocks=4,
+            negative_slope=0.0
+        )
+    elif args.model == "transformer":
+        model = ChessTransformer(
+            d_model=128,
+            nhead=4,
+            num_layers=4,
+            dim_feedforward=512,
+            dropout=0.0,
+            freeze_pos=True,
+        )
+    elif args.model == "ensemble":
+        model = EnsembleCNNTransformer(
+            cnn=ChessCNN(
+                num_filters=app_config.MODEL_CNN_NUM_FILTERS,
+                num_residual_blocks=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
+                negative_slope=app_config.MODEL_CNN_NEGATIVE_SLOPE,
+                dropout=app_config.MODEL_CNN_DROPOUT,
+            ),
+            transformer=ChessTransformer(
+                d_model=app_config.MODEL_TRANSFORMER_D_MODEL,
+                nhead=app_config.MODEL_TRANSFORMER_NUM_HEADS,
+                num_layers=app_config.MODEL_TRANSFORMER_NUM_LAYERS,
+                dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
+                dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
+                freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
+            ),
+        )
+    else:
+        raise ValueError(f"Invalid model type: {args.model}")
     hparams = dict(
         MODEL_TRANSFORMER_D_MODEL=app_config.MODEL_TRANSFORMER_D_MODEL,
         MODEL_TRANSFORMER_NUM_HEADS=app_config.MODEL_TRANSFORMER_NUM_HEADS,
@@ -281,7 +416,6 @@ if __name__ == "__main__":
         MODEL_TRANSFORMER_DIM_FEEDFORWARD=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
         MODEL_TRANSFORMER_DROPOUT=app_config.MODEL_TRANSFORMER_DROPOUT,
         MODEL_TRANSFORMER_FREEZE_POS=app_config.MODEL_TRANSFORMER_FREEZE_POS,
-        MODEL_TRANSFORMER_ADD_GLOBAL=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
         MODEL_CNN_NUM_FILTERS=app_config.MODEL_CNN_NUM_FILTERS,
         MODEL_CNN_RESIDUAL_BLOCKS=app_config.MODEL_CNN_RESIDUAL_BLOCKS,
         MODEL_CNN_NEGATIVE_SLOPE=app_config.MODEL_CNN_NEGATIVE_SLOPE,
@@ -291,9 +425,10 @@ if __name__ == "__main__":
     save_hparams(hparams, f"{model.__class__.__name__}_{timestamp}")
     pretrained_model, q_losses, aux_losses = pretrain_model(
         model,
-        num_epochs=5,
-        batch_size=128,
-        learning_rate=4e-4,
+        num_epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
         timestamp=timestamp,
+        data_dir=base_path / "data" / args.data_dir,
     )
     save_model(pretrained_model, f"{timestamp}_final")

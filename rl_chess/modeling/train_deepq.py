@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeepQTrainer:
-    CURRICULUM_BUFFER_PATH = base_path / "data" / "curriculum_buffers"
+    CURRICULUM_BUFFER_PATH = base_path / "data" / "curriculum_buffers_v3"
 
     def __init__(
         self,
@@ -200,7 +200,7 @@ class DeepQTrainer:
             "MODEL_TRANSFORMER_DIM_FEEDFORWARD": app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
             "MODEL_TRANSFORMER_DROPOUT": app_config.MODEL_TRANSFORMER_DROPOUT,
             "MODEL_TRANSFORMER_FREEZE_POS": app_config.MODEL_TRANSFORMER_FREEZE_POS,
-            "MODEL_TRANSFORMER_ADD_GLOBAL": app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
+            # "MODEL_TRANSFORMER_ADD_GLOBAL": app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
 
             "MODEL_GAMMA": app_config.MODEL_GAMMA,
             "MODEL_INITIAL_GAMMA": app_config.MODEL_INITIAL_GAMMA,
@@ -294,11 +294,15 @@ class DeepQTrainer:
 
                     turns = [board.turn for board in boards]
 
+                    move_count = torch.tensor(n_moves, device=self.device).expand(
+                        current_states.size(0)
+                    )
+
                     ### Calculate Player move ###
 
                     logger.debug("START Predicting Q values")
                     # Predict Q-values
-                    predicted_q_values, _ = model(current_states)
+                    predicted_q_values, _ = model(current_states, move_count)
                     logger.debug("END Predicting Q values")
 
                     logger.debug("START Masking illegal moves")
@@ -333,13 +337,13 @@ class DeepQTrainer:
                         break
                     rewards = torch.tensor(
                         [
-                            calculate_reward(board, move)
+                            calculate_reward(board, move, move_count=n_moves)
                             for board, move in zip(boards, moves)
                         ]
                     ).to(self.device)
                     # Calculate default reward for opponent move (if opponent can't make a move such as in checkmate or stalemate)
                     default_opp_rewards = [
-                        calculate_reward(board, move, flip_perspective=True)
+                        calculate_reward(board, move, flip_perspective=True, move_count=n_moves)
                         for board, move in zip(boards, moves)
                     ]
 
@@ -361,8 +365,11 @@ class DeepQTrainer:
                     logger.debug("END Preparing Opponent move")
 
                     logger.debug("START Predicting Opponent Q values")
+                    opp_move_count = torch.tensor(
+                        n_moves + 1, device=self.device
+                    ).expand(opp_next_states.size(0))
                     # Select opponent next move
-                    opp_next_q_values, _ = model(opp_next_states)
+                    opp_next_q_values, _ = model(opp_next_states, opp_move_count)
                     logger.debug("END Predicting Opponent Q values")
 
                     logger.debug("START Masking illegal moves for Opponent")
@@ -398,7 +405,7 @@ class DeepQTrainer:
                     # Calculate reward for opponent move
                     opp_rewards = torch.tensor(
                         [
-                            calculate_reward(board, opp_move) if opp_move else default
+                            calculate_reward(board, opp_move, n_moves + 1) if opp_move else default
                             for opp_move, default, board in zip(
                                 opp_moves, default_opp_rewards, boards
                             )
@@ -423,7 +430,10 @@ class DeepQTrainer:
                     logger.debug("END Preparing next state")
 
                     logger.debug("START Predicting next Q values")
-                    next_q_values, _ = model(next_states)
+                    next_move_count = torch.tensor(
+                        n_moves + 2, device=self.device
+                    ).expand(next_states.size(0))
+                    next_q_values, _ = model(next_states, next_move_count)
                     logger.debug("END Predicting next Q values")
 
                     logger.debug("START Masking illegal moves for next state")
@@ -502,6 +512,7 @@ class DeepQTrainer:
                             pred_q_values=pred_q,
                             max_next_q=max_next_q.item(),
                             color=turn,
+                            move_count=torch.tensor(n_moves),
                         )
                     )
                 logger.debug("END Creating ExperienceRecord")
@@ -554,14 +565,18 @@ class DeepQTrainer:
             opp_done_batch = torch.tensor(
                 [int(exp.opp_done) for exp in batch], device=self.device
             )
+            move_count_batch = torch.tensor(
+                [exp.move_count for exp in batch],
+            ).to(self.device)
+            next_move_count_batch = move_count_batch + 2  # Next move count is current move count + 2, 1 for opponent move and 1 for player move
 
             with torch.amp.autocast("cuda", enabled=enable_amp):
-                predicted_q_values, aux_logits = model(state_batch)
+                predicted_q_values, aux_logits = model(state_batch, move_count_batch)
                 predicted_q = predicted_q_values.gather(1, action_batch)
 
             # Use target network for next Q-values
             with torch.no_grad(), torch.amp.autocast("cuda", enabled=enable_amp):
-                next_q_values, _ = target_model(next_state_batch)
+                next_q_values, _ = target_model(next_state_batch, next_move_count_batch)
                 masked_next_q_values = next_q_values.masked_fill(
                     next_legal_moves_mask_batch == 0, torch.finfo(next_q_values.dtype).min
                 )
@@ -630,8 +645,11 @@ class DeepQTrainer:
             legal_moves_mask_batch = torch.stack(
                 [exp.legal_moves_mask for exp in batch], dim=0
             )
+            move_count_batch = torch.tensor(
+                [exp.move_count for exp in batch],
+            ).to(self.device)
             with torch.no_grad():
-                _, aux_logits = model(state_batch)
+                _, aux_logits = model(state_batch, move_count_batch)
             predicted_labels = torch.round(torch.sigmoid(aux_logits))
             correct += (predicted_labels == legal_moves_mask_batch).sum().item()
             total += legal_moves_mask_batch.numel()
@@ -670,9 +688,11 @@ class DeepQTrainer:
                 legal_moves_mask = (
                     get_legal_moves_mask(board).unsqueeze(0).to(self.device)
                 )
+                # Dummy move count
+                move_count = torch.tensor(20, device=self.device).unsqueeze(0)
 
                 # Model predictions
-                q_values, _ = model(state)
+                q_values, _ = model(state, move_count)
 
                 counts_by_type[board_type] += 1
 
@@ -991,7 +1011,7 @@ def load_from_checkpoint(
             dim_feedforward=hparams["MODEL_TRANSFORMER_DIM_FEEDFORWARD"],
             dropout=hparams["MODEL_TRANSFORMER_DROPOUT"],
             freeze_pos=hparams["MODEL_TRANSFORMER_FREEZE_POS"],
-            add_global=hparams["MODEL_TRANSFORMER_ADD_GLOBAL"],
+            # add_global=hparams["MODEL_TRANSFORMER_ADD_GLOBAL"],
         ).to(device)
     elif checkpoint_model_class == "EnsembleCNNTransformer":
         model = EnsembleCNNTransformer(
@@ -1008,7 +1028,7 @@ def load_from_checkpoint(
                 dim_feedforward=hparams["MODEL_TRANSFORMER_DIM_FEEDFORWARD"],
                 dropout=hparams["MODEL_TRANSFORMER_DROPOUT"],
                 freeze_pos=hparams["MODEL_TRANSFORMER_FREEZE_POS"],
-                add_global=hparams["MODEL_TRANSFORMER_ADD_GLOBAL"],
+                # add_global=hparams["MODEL_TRANSFORMER_ADD_GLOBAL"],
             ),
         ).to(device)
 
@@ -1038,7 +1058,6 @@ def create_model(model_class: str, app_config: AppConfig, device: torch.device) 
             dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
             dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
             freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
-            add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
         ).to(device)
     elif model_class == "EnsembleCNNTransformer":
         model = EnsembleCNNTransformer(
@@ -1055,7 +1074,6 @@ def create_model(model_class: str, app_config: AppConfig, device: torch.device) 
                 dim_feedforward=app_config.MODEL_TRANSFORMER_DIM_FEEDFORWARD,
                 dropout=app_config.MODEL_TRANSFORMER_DROPOUT,
                 freeze_pos=app_config.MODEL_TRANSFORMER_FREEZE_POS,
-                add_global=app_config.MODEL_TRANSFORMER_ADD_GLOBAL,
             ),
         ).to(device)
     return model

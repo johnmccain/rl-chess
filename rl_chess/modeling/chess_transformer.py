@@ -39,49 +39,61 @@ class ChessTransformerEmbeddings(nn.Module):
         vocab_size: int,
         d_model: int,
         freeze_pos: bool = False,
-        add_global: bool = True,
+        move_count_scale_factor: float = 0.05,
     ) -> None:
         """
         :param vocab_size: The number of unique tokens in the input.
         :param d_model: The number of dimensions of the embeddings.
         :param freeze_pos: Whether to freeze the positional embeddings.
-        :param add_global: Whether to add a global token in the input.
+        :param move_count_scale_factor: The scale factor for the move count
         """
         super(ChessTransformerEmbeddings, self).__init__()
-        self.add_global = add_global
+
+        self.move_count_scale_factor = move_count_scale_factor
         self.vocab_size = vocab_size
         self.embedding = nn.Embedding(
-            self.vocab_size if not add_global else self.vocab_size + 1,
+            self.vocab_size,
             d_model,
         )
         pos_embedding_tensor = torch.tensor(
             get_sinusoidal_embeddings(d_model), dtype=torch.float
         )
-        if add_global:
-            global_token = torch.zeros(1, d_model)
-            pos_embedding_tensor = torch.cat([global_token, pos_embedding_tensor], dim=0)
+        move_count_token = torch.zeros(1, d_model)
+        pos_embedding_tensor = torch.cat([move_count_token, pos_embedding_tensor], dim=0)  # Prepend move count token positional embedding
         self.pos_encoder = nn.Embedding.from_pretrained(
             pos_embedding_tensor,
             freeze=freeze_pos,
         )
         pos_ids = torch.arange(
-            self.SEQ_LEN if not add_global else self.SEQ_LEN + 1, dtype=torch.long
+            self.SEQ_LEN + 1, dtype=torch.long  # +1 for the move count token
         ).unsqueeze(0)
         self.register_buffer("pos_ids", pos_ids)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (batch_size, seq_len)
-        if self.add_global:
-            # Add global token to the input
-            global_token = torch.full_like(x[:, 0], self.vocab_size).unsqueeze(1)
-            x = torch.cat([global_token, x], dim=1)
+        self.move_count_embedding = nn.Linear(1, d_model)
 
-        # x: (batch_size, seq_len) -> (batch_size, seq_len, d_model)
-        x = self.embedding(x) + self.pos_encoder(self.pos_ids)
+    def forward(self, x: torch.Tensor, move_count: torch.Tensor) -> torch.Tensor:
+        # x: (batch_size, seq_len)
+        # move_count: (batch_size,)
+
+        move_count = move_count.unsqueeze(1)  # (batch_size, 1)
+        move_count = move_count * self.move_count_scale_factor
+        move_count_embed = self.move_count_embedding(
+            move_count
+        ).unsqueeze(1)  # (batch_size, 1, d_model)
+
+        # Piece embeddings
+        x = self.embedding(x)  # (batch_size, seq_len + 1, d_model)
+
+        # Combine turn count token with piece embeddings
+        x = torch.cat([move_count_embed, x], dim=1)  # (batch_size, seq_len+1, d_model)
+
+        # x: (batch_size, seq_len) -> (batch_size, seq_len + 1, d_model)
+        x = x + self.pos_encoder(self.pos_ids)
         return x
 
 
 class ChessTransformer(nn.Module):
+
     """
     Encoder-only transformer model for chess board evaluation. Deep-Q learning.
     """
@@ -98,8 +110,8 @@ class ChessTransformer(nn.Module):
         dim_feedforward: int,
         dropout: float,
         freeze_pos: bool = True,
-        add_global: bool = True,
-    ):
+        move_count_scale_factor: float = 0.05,
+    ) -> None:
         super(ChessTransformer, self).__init__()
         self.d_model = d_model
         self.nhead = nhead
@@ -107,13 +119,13 @@ class ChessTransformer(nn.Module):
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
         self.freeze_pos = freeze_pos
-        self.add_global = add_global
+        self.move_count_scale_factor = move_count_scale_factor
 
         self.embedding = ChessTransformerEmbeddings(
             vocab_size=self.VOCAB_SIZE,
             d_model=d_model,
             freeze_pos=freeze_pos,
-            add_global=add_global,
+            move_count_scale_factor=move_count_scale_factor,
         )
         self.layers = nn.ModuleList(
             nn.TransformerEncoderLayer(
@@ -136,21 +148,21 @@ class ChessTransformer(nn.Module):
             "freeze_pos": self.freeze_pos,
         }
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # x: (batch_size, seq_len) -> (batch_size, seq_len, d_model)
-        # (seq_len + 1 if add_global)
-        x = self.embedding(x)
+    def forward(self, x: torch.Tensor, move_count: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # move_count: (batch_size,)
+
+        # x: (batch_size, seq_len) -> (batch_size, seq_len + 1, d_model) (+1 for move count token)
+        x = self.embedding(x, move_count)
 
         for layer in self.layers:
-            # x: (batch_size, seq_len, d_model) -> (batch_size, seq_len, d_model)
+            # x: (batch_size, seq_len + 1, d_model) -> (batch_size, seq_len + 1, d_model)
             x = layer(x)
 
         x = self.layer_norm(x)
         x = self.fc_dropout(x)
 
-        # Remove the global token prior to fc layers if it was added
-        if self.add_global:
-            x = x[:, 1:, :]
+        # Remove the move count token prior to fc layers
+        x = x[:, 1:, :]
 
         # x: (batch_size, seq_len, d_model) -> (batch_size, seq_len, output_dim)
         policy = self.policy_fc(x)
